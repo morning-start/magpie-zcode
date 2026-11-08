@@ -41,8 +41,10 @@ const RULES = [
   ["Cookie 值", /\b(?:set-)?cookie\s*[:=]\s*["'`][^"'`]{20,}/gi],
 ];
 
-/** 这些邮箱/域名是文档示例或 GitHub 托管地址，不算泄露 */
-const MAIL_OK = /@(?:users\.noreply\.github\.com|example\.(?:com|org)|localhost)$|^git@github\.com$|^(?:user|someone|test|you|name|me|foo|bar|a|b|1|2|x|y|abc|demo)@/i;
+/** 这些邮箱/域名是文档示例或 GitHub 托管地址，不算泄露。
+ *  `.local` / `.test` / `.invalid` / `.example` 是 RFC 6761/6762 保留给本地与示例的
+ *  TLD —— 测试里的假账号（`ada@phone.local` 这种）用它们不是真地址，放行。 */
+const MAIL_OK = /@(?:users\.noreply\.github\.com|example\.(?:com|org)|localhost|(?:[a-z0-9-]+\.)+(?:local|test|invalid|example))$|^git@github\.com$|^(?:user|someone|test|you|name|me|foo|bar|a|b|1|2|x|y|abc|demo)@/i;
 const IP_OK = /^(?:127\.|0\.0\.0\.0|10\.0\.0\.1|192\.0\.2\.)/;
 
 const TEXT = /\.(md|mjs|js|cjs|ts|tsx|json|jsonc|yml|yaml|ps1|sh|txt|html|css|toml)$/i;

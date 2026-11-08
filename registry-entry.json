@@ -1,9 +1,9 @@
 {
-  "package": "your-package-name",
-  "name": "⚠ 未命名插件 Unnamed Plugin",
-  "providers": ["your-provider-id"],
+  "package": "magpie-zcode",
+  "name": "智谱 ZCode",
+  "providers": ["zcode"],
   "summary": {
-    "en": "One sentence: what it signs in to, and what the user gets.",
-    "zh": "一句话：签入什么服务，用户得到什么。"
+    "en": "Signs in to ZCode's GLM Coding Plan (Z.ai or BigModel) as the ZCode app does — including team seats and ZCode's free Start Plan — and claims its gift plans daily.",
+    "zh": "像 ZCode App 那样登录 ZCode 的 GLM Coding Plan（Z.ai 或智谱 BigModel），包括团队席位和免费的 Start Plan，并每天替用户领取赠送计划。"
   }
 }

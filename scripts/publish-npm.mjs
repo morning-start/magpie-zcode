@@ -13,7 +13,7 @@
 import { spawnSync } from "node:child_process"
 import { readFileSync, writeFileSync } from "node:fs"
 
-const PUBLISH_AS = "magpie-plugin-scaffold"
+const PUBLISH_AS = "magpie-zcode"
 const file = new URL("../package.json", import.meta.url)
 const original = readFileSync(file, "utf8")
 const pkg = JSON.parse(original)

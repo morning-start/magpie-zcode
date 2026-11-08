@@ -1,7 +1,7 @@
 {
-  "name": "unnamed-plugin",
-  "version": "0.3.12",
-  "description": "A magpie / OpenCode provider plugin scaffold: all nine hooks implemented in one file, plus the enforceable rules a provider plugin must pass — icon in two places, MIT license, no helper functions exported, no secrets. Clone it, implement five functions, run the check.",
+  "name": "magpie-zcode",
+  "version": "0.1.0",
+  "description": "magpie provider plugin: signs in to ZCode's GLM Coding Plan (Z.ai or BigModel / 智谱) the way ZCode does, including team seats and ZCode's free Start Plan, and claims its gift plans daily",
   "type": "module",
   "main": "./index.mjs",
   "exports": "./index.mjs",
@@ -40,26 +40,29 @@
     "opencode-plugin",
     "opencode-auth",
     "provider",
-    "template",
-    "boilerplate",
-    "checkin"
+    "zcode",
+    "z.ai",
+    "bigmodel",
+    "glm",
+    "coding-plan"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MYCF711/magpie-plugin-scaffold.git"
+    "url": "git+https://github.com/morning-start/magpie-zcode.git"
   },
   "bugs": {
-    "url": "https://github.com/MYCF711/magpie-plugin-scaffold/issues"
+    "url": "https://github.com/morning-start/magpie-zcode/issues"
   },
-  "homepage": "https://github.com/MYCF711/magpie-plugin-scaffold#readme",
+  "homepage": "https://github.com/morning-start/magpie-zcode#readme",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
   "magpie": {
-    "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjI4IiBmaWxsPSIjMWYyOTM3Ii8+PHRleHQgeD0iNjQiIHk9Ijg0IiBmb250LXNpemU9IjYwIiBmb250LWZhbWlseT0ic3lzdGVtLXVpLHNhbnMtc2VyaWYiIGZvbnQtd2VpZ2h0PSI3MDAiIGZpbGw9IiM2MGE1ZmEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkE8L3RleHQ+PC9zdmc+",
-    "maxConcurrency": 4,
-    "name": "⚠ 未命名插件 Unnamed Plugin"
+    "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjI4IiBmaWxsPSIjMTQxNTFhIi8+PHRleHQgeD0iNjQiIHk9Ijg2IiBmb250LXNpemU9IjcyIiBmb250LWZhbWlseT0ic3lzdGVtLXVpLHNhbnMtc2VyaWYiIGZvbnQtd2VpZ2h0PSI3MDAiIGZpbGw9IiM0ZDZmZjciIHRleHQtYW5jaG9yPSJtaWRkbGUiPlo8L3RleHQ+PC9zdmc+",
+    "maxConcurrency": 3,
+    "maxAccounts": 2,
+    "name": "智谱 ZCode"
   },
   "scripts": {
     "test": "node --test",
