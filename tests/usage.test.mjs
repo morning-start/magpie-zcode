@@ -507,7 +507,7 @@ test("the real banner feed names its plan once on the card", async () => {
   const real = readFileSync(new URL("./testdata/touch-1030-wk.json", import.meta.url), "utf8")
   const calls = serve(({ url }) => {
     if (url.pathname === "/api/v1/zcode-plan/billing/balance") return ok(startBalance(now, "active"))
-    if (url.pathname === "/api/v1/zcode-plan/billing/preview") return ok(PREVIEW_CLAIMED)
+    if (url.pathname === "/api/v1/zcode-plan/billing/preview") throw new Error("the card must not read preview: the app's banners are marketing/touch alone")
     if (url.pathname === "/api/v1/marketing/touch") return new Response(real)
   })
   const u = await usage(oauth({ site: "zai", jwt: token, device: "11111111-2222-4333-8444-555555555555" }))

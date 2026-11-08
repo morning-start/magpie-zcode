@@ -6,6 +6,17 @@
 > 本仓库派生自 [magpie 插件脚手架](https://github.com/MYCF711/magpie-plugin-scaffold)（模板历史停在 0.3.12），
 > 插件自己的版本从 0.1.0 起算。
 
+## 0.1.1 — 2026-11-08
+
+**签到对齐 deepseek-harness-codearts 的 zcode 领取语义（只对齐语义，不产 captcha）**
+
+- **3012 账号级风控必须短路**：命中后不再发剩余 plan，也不给 `until` 让 magpie 重试 —— 连续重试会把 30 分钟冷却推成 24 小时甚至停用（参考实现 Gitee issue IKJOQB）
+- **营销回执（confirm）**：领取成功（code 0 或 1003 已领取）且 plan 带 campaign id 时回执一次，否则服务端每轮都把同一条 campaign 再投放一遍、为一个已领的 plan 反复要验证
+- **补活跃上报**：列 plan 前先报 `app_launch` / `app_daily_active`；上报失败只降级，不让整个签到变 failed
+- **preview + marketing/touch 合并**：preview 主路径、营销 feed 补充，按 plan id 去重；单源失败只降级、两源都读不到才 failed（卡片那行仍只读 feed）
+- **没 plan 的文案**改成「今日暂无可领额度（服务端按日刷新）」；outcome 词表不变（仍是 inactive + 半小时后重问）
+- 顺手修 `claimOne` 里未 import 的 `anyDevice`（device 为空时会静默变成 failed）
+
 ## 0.1.0 — 2026-11-08
 
 **首个版本：ZCode 的 GLM Coding Plan，按 magpie 插件架构重写**

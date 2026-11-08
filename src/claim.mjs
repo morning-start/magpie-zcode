@@ -1,11 +1,13 @@
 // src/claim.mjs —— 每日领取 ZCode 的赠送计划（auth.checkin）
 //
-// ZCode 在营销 feed（marketing/touch）里投节日/新用户的计划，账号要在 ZCode
-// App 里点领取。这里替用户领：feed 里有什么、领没领过（1003）、要不要求
-// 安全验证（3007）、是不是限流（3002）。限流的等待记在本进程里，
+// ZCode 的赠送计划从两个列表发出来：每日赠送在 billing/preview，节日/新用户的
+// 活动在营销 feed（marketing/touch）里，账号要在 ZCode App 里点领取。这里替
+// 用户领：两个列表各有什么（按 plan id 去重）、领没领过（1003）、要不要求
+// 安全验证（3007）、是不是限流（3002）、是不是账号级风控（3012，命中即停）。
+// 领到之后还要给营销活动回执（confirm）。限流的等待记在本进程里，
 // 等待期内不再打上游（magpie 的 429 退避与厂商的「频率过高」不是一回事）。
 
-import { ZCODE, APP_VERSION, UA, platform, first, STATUS_TEXT, jwtExpired, EXPIRED, sleep } from "./zcode.mjs"
+import { ZCODE, APP_VERSION, UA, platform, first, anyDevice, STATUS_TEXT, jwtExpired, EXPIRED, sleep } from "./zcode.mjs"
 import { call, retryAfterMs } from "./zai-call.mjs"
 import { clientConfigs } from "./catalog.mjs"
 import { routes } from "./plan.mjs"
@@ -17,7 +19,7 @@ const CLAIM_HINT = "Gift plans to claim in the ZCode app"
 
 // claimHint is the card's line for gift plans ZCode is holding for the
 // account but has not put on it: the app's banners (marketing/touch)
-// list them (toClaim). The
+// list them. The
 // card only names them: they are claimed in the ZCode app, or by the
 // daily claim (claimDaily) when the user turned it on; on 10-06 a claim
 // without the app's Aliyun captcha attestation was refused (3007). A window, set aside (it is no
@@ -25,12 +27,18 @@ const CLAIM_HINT = "Gift plans to claim in the ZCode app"
 // routing, caps and the menu bar pass it over. The window's name is a
 // fixed sentence, so magpie can translate it (a display is shown as it
 // came); the count and the plan's own name go in the display. null when
-// there is nothing to claim, the preview failing or listing none among
+// there is nothing to claim, the feed failing or listing none among
 // it: a failed read is no line at all, never a card or a refusal of its
 // own.
+//
+// The card reads the feed alone (`preview: false`): a preview gift plan
+// has no banner, so there is no line to name it on — the daily claim
+// (claimDaily) claims it all the same. It also keeps a card read a read
+// of the feed, and one request (tests/usage.test.mjs pins the card to
+// the feed).
 async function claimHint(s) {
   if (!s.jwt || jwtExpired(s.jwt)) return null
-  const { plans } = await toClaim(s)
+  const { plans } = await toClaim(s, { preview: false })
   if (!plans.length) return null
   const n = plans.length
   const plan = first(...plans.map((p) => p.name), "ZCode gift plan")
@@ -47,6 +55,18 @@ async function claimHint(s) {
 // (seen 10-06, #30).
 const CLAIMED_ALREADY = 1003
 const CAPTCHA = 3007
+// UNUSUAL_ACTIVITY is ZCode's answer to an account its risk control has
+// flagged: HTTP 405 {"code":3012,"msg":"request has been blocked due to
+// unusual activity."} (Gitee iJetLi/deepseek-harness-codearts,
+// src/zcode-diagnostics.ts 的 isZcodeUnusualActivityCode /
+// formatZcodeUnusualActivityMessage，两个入口共用同一份文案 ——
+// 推理侧 src/zcode-adapter.ts 与领取侧 src/zcode-auth.ts 曾各写一份而漂移)。
+// 它是**账号级**的：冷却 30 分钟起步，反复触发会升级到 24 小时乃至停用。
+// 所以命中它的签到**不再发剩余 plan**（一次点击连发 N 个 plan = 连撞 N 次
+// 风控），也不带 `until`（magpie 会按 `until` 重试，而重试正是加重冷却的
+// 动作）。3007 与它方向相反：3007 换个新 param 就能过，3012 再发只会更糟。
+const UNUSUAL_ACTIVITY = 3012
+const UNUSUAL_ACTIVITY_CLAIM = "ZCode's risk control blocked this account for unusual activity (code 3012); the cooldown starts at 30 minutes and asking again raises it to 24 hours or a block, so don't retry one after another"
 // NOT_ELIGIBLE is /billing/claim's body code for a plan the account is not
 // offered at that moment: HTTP 400 {"code":1004,…}. A stale APP_VERSION
 // answers it for every account at once (11-04: six accounts all answered
@@ -153,6 +173,10 @@ async function claimOne(s, planID) {
   // a rate limit is no claim: it is said as one, and carries how long to wait
   if (res.status === 429 || code === RATE_LIMITED) return { outcome: "failed", why: `${msg || STATUS_TEXT[429]} (HTTP ${res.status}${Number.isFinite(code) ? `, code ${code}` : ""})`, rate: retryAfterMs(res) }
   if (code === CAPTCHA || CAPTCHA_WORDS.test(msg)) return { outcome: "captcha", why: msg || `code ${code}` }
+  // 3012 不是这一个 plan 的失败，是账号被风控：文案说清冷却与「别连续重试」，
+  // 并打上 blocked 让 claimDaily 短路（见 UNUSUAL_ACTIVITY）。放在 3007 之后、
+  // 1003 之前，与上游 toClaimOutcome 的分支顺序一致。
+  if (code === UNUSUAL_ACTIVITY) return { outcome: "failed", why: UNUSUAL_ACTIVITY_CLAIM, blocked: true }
   if (code === CLAIMED_ALREADY) return { outcome: "done" }
   if (code === NOT_ELIGIBLE) return { outcome: "ineligible", why: msg || `code ${code}` }
   if (code === 0 && res.ok) return { outcome: "claimed" }
@@ -168,11 +192,36 @@ async function claimOne(s, planID) {
 // X-Device-Mid, X-Client-Language and X-ZCode-App-Version, answered
 // data.deliveries[].banner.buttons[].action = {"type":"claim_zcode_plan",
 // "args":{"plan_id":…}} and the plan's name in
-// banner.background.args.zcode_plan.name). The v3.17 client reads this
-// feed alone: the old preview polling is gone, and the rewards center's
-// gifts are the rewards website's, claimed in the client.
+// banner.background.args.zcode_plan.name). This feed only **supplements**
+// the preview (see PREVIEW): a campaign plan (1024's five hundred million
+// tokens) is in the feed alone, while the day's gift plan is in the
+// preview alone, so a check-in that reads one list misses the other
+// (Gitee iJetLi/deepseek-harness-codearts, src/zcode-upstream.ts's
+// fetchZcodeMarketingPlans + mergeZcodeClaimablePlans). A rewards
+// center's gift lives on the rewards website, outside this API, and is
+// claimed in the client.
 const TOUCH = "/api/v1/marketing/touch"
+// PREVIEW is ZCode's daily gift plans: GET
+// /api/v1/zcode-plan/billing/preview?app_version=…&platform=…, answered
+// data.plans[].plan_id. It is the main list (a daily gift plan is
+// claimed with no banner); the machine's id is all it needs, no
+// Authorization.
+const PREVIEW = "/api/v1/zcode-plan/billing/preview"
+// CLAIM_ACTION is the marketing feed's claim button: a delivery's
+// buttons[].action = {"type":"claim_zcode_plan","args":{"plan_id":…}}.
 const CLAIM_ACTION = "claim_zcode_plan"
+// MARKETING_ACTION is the feed's receipt endpoint: POST
+// /api/v1/marketing/touch/action {campaign_id, action_type}. The app's
+// renderer sends "confirm" right after a campaign's plan is claimed; a
+// campaign never confirmed is put back every round (confirmPlan).
+const MARKETING_ACTION = "/api/v1/marketing/touch/action"
+// EVENT_REPORT is the client's own activity report: POST
+// /api/v1/event/report {event, device_mid, platform, app_version}. ZCode
+// hands out the day's plans by it: before the two events
+// (ACTIVATION_EVENTS) are reported its preview answers empty plans, and
+// after them the day's gift plan (reportActivation).
+const EVENT_REPORT = "/api/v1/event/report"
+const ACTIVATION_EVENTS = ["app_launch", "app_daily_active"]
 // touchSeq is the feed's seq: ZCode's own count of its feed requests
 // since the process started, from 0, one GET per refresh. It is not a
 // page: "仅供服务端日志定位，不改变投放判断" (docs/marketing-touch-client.md,
@@ -192,10 +241,12 @@ const clientLanguage = () => {
 }
 
 // touchPlans is the plans marketing/touch's deliveries offer to claim:
-// [{plan_id, name}], [] for a feed with no deliveries, null for one that
-// doesn't read. Each delivery is searched for its claim_zcode_plan
-// actions and its zcode_plan's name, wherever the banner keeps them, so
-// a button moved inside the banner is still found.
+// [{plan_id, name, campaign_id?}], [] for a feed with no deliveries,
+// null for one that doesn't read. Each delivery is searched for its
+// claim_zcode_plan actions and its zcode_plan's name, wherever the
+// banner keeps them, so a button moved inside the banner is still found.
+// The delivery's campaign_id comes along: it is what the claim's receipt
+// (confirmPlan) is sent for.
 function touchPlans(d) {
   if (d == null) return []
   if (typeof d !== "object" || Array.isArray(d)) return null
@@ -212,36 +263,141 @@ function touchPlans(d) {
       for (const k of Object.keys(v)) walk(v[k], depth + 1)
     }
     walk(dv, 0)
-    for (const id of ids) out.push({ plan_id: id, name: first(names[0] ?? "", id) })
+    const campaign = typeof dv?.campaign_id === "string" ? dv.campaign_id.trim() : ""
+    for (const id of ids) out.push({ plan_id: id, name: first(names[0] ?? "", id), ...(campaign ? { campaign_id: campaign } : {}) })
   }
   return out
 }
 
-// toClaim is every gift plan the account can claim: what the app's
-// marketing feed offers (its banners). The v3.17 client replaced the old
-// preview polling with the feed alone (docs/marketing-touch-client.md in
-// zai-org/ZCode), so the preview is read no more; a rewards center's gift
-// lives on the rewards website, outside this API, and is claimed in the
-// client. unread names a feed that didn't read: its plans are unknown,
+// previewPlans is the plans billing/preview offers to claim:
+// [{plan_id, name}], [] for a reply naming no plan, null for one that
+// doesn't read. Only plan_id and name are read: the amount the preview
+// also carries is no part of auth.checkin's answer (magpie's window,
+// not this hook, counts allowance), and an unread reply is unknown,
 // never none.
-async function toClaim(s) {
+function previewPlans(d) {
+  if (d == null) return []
+  if (typeof d !== "object" || Array.isArray(d)) return null
+  if (d.plans == null) return []
+  if (!Array.isArray(d.plans)) return null
+  const out = []
+  for (const p of d.plans) {
+    if (!p || typeof p !== "object" || Array.isArray(p)) continue
+    if (typeof p.plan_id !== "string" || !p.plan_id.trim()) continue
+    out.push({ plan_id: p.plan_id.trim(), name: first(p.name, p.plan_id.trim()) })
+  }
+  return out
+}
+
+// toClaim is every gift plan the account can claim, from both lists
+// ZCode hands them out in: the preview (the day's gift plan) first, the
+// marketing feed (the app's campaign banners) beside it, deduped by plan
+// id — a plan both lists name is claimed once. A plan the feed also names
+// keeps the preview's fields (they are the ones read before) and takes
+// the feed's campaign_id, which is what its receipt (confirmPlan) goes
+// out for (Gitee iJetLi/deepseek-harness-codearts,
+// src/zcode-upstream.ts's mergeZcodeClaimablePlans: preview wins, the
+// campaign id is filled in).
+//
+// unread names a list that didn't read: its plans are unknown, never
+// none, and claimDaily fails (asks again) when no plan was read at all.
+// One list failing is **not** the other's failure — ZCode's preview and
+// its marketing feed fail apart, and a check-in that read the day's gift
+// plan must not be undone by a banner feed that was down (the same
+// degradation the reference has, "营销 feed 失败降级为 []").
+//
+// `preview: false` reads the feed alone: that is the card's line
+// (claimHint), which names the app's banners — a preview gift plan has no
+// banner to name, and a card read stays a read of the feed (a card read
+// posts no preview request; tests/usage.test.mjs pins it).
+async function toClaim(s, { preview: withPreview = true } = {}) {
   const plans = [], unread = []
+  let rate = null
   const add = (p) => {
-    if (!plans.some((q) => q.plan_id === p.plan_id)) plans.push(p)
+    const at = plans.findIndex((q) => q.plan_id === p.plan_id)
+    if (at < 0) {
+      plans.push({ ...p })
+      return
+    }
+    if (plans[at].campaign_id === undefined && p.campaign_id !== undefined) plans[at] = { ...plans[at], campaign_id: p.campaign_id }
   }
-  let d
+  const read = async (label, fetchPlans) => {
+    let got
+    try {
+      got = await fetchPlans()
+    } catch (e) {
+      unread.push(`gift plans to claim: ${label}: ${e?.message ?? String(e)}`)
+      // rate is the ms ZCode asked to wait (0 when it sent no
+      // Retry-After), null when this was not a rate limit at all
+      if (rate === null && (e?.status === 429 || e?.code === RATE_LIMITED)) rate = e.retryAfterMs || 0
+      return
+    }
+    if (!got) {
+      unread.push(`gift plans to claim: ${label} doesn't read`)
+      return
+    }
+    got.forEach(add)
+  }
+  if (withPreview) await read("the plan list", () => call("GET", `${ZCODE}${PREVIEW}?app_version=${APP_VERSION}&platform=${platform()}`, { device: s.device, headers: marketingHeaders() }).then(previewPlans))
+  await read("the marketing feed", () => call("GET", `${ZCODE}${TOUCH}?seq=${touchSeq++}`, { auth: "Bearer " + s.jwt, device: s.device, headers: marketingHeaders() }).then(touchPlans))
+  return { plans, unread, rate }
+}
+
+// reportActivation tells ZCode the client was started and used today —
+// the two events its gift plans depend on. The server does not push a
+// plan on its own schedule: before these two POSTs its preview answers
+// an empty plans, and after them the day's gift plan (Gitee
+// iJetLi/deepseek-harness-codearts, src/zcode-upstream.ts's
+// reportZcodeActivation — "不补这两条事件，preview 恒为空 plans: [] ⇒
+// 用户以为签到坏了"; the events are idempotent, the server deduping by
+// device_mid and date, so every ask may report them).
+//
+// A report that fails is **not** the check-in's failure: it is reported
+// again on the next ask, and a failed report must never turn a claim into
+// a failed one — so each event is its own try, and nothing is said about
+// it. platform is the machine's own name (win32 / darwin / linux; the
+// reference's "win32" is the ZCode desktop's, being the only one that
+// exists there), and the app version is the current client's, as every
+// call here sends it.
+async function reportActivation(s) {
+  for (const event of ACTIVATION_EVENTS) {
+    try {
+      await call("POST", `${ZCODE}${EVENT_REPORT}`, {
+        device: s.device,
+        headers: marketingHeaders(),
+        body: { event, device_mid: s.device || anyDevice, platform: process.platform, app_version: APP_VERSION },
+      })
+    } catch {}
+  }
+}
+
+// confirmPlan takes the marketing feed's receipt for a plan that was
+// claimed (code 0) or had been (1003): POST /marketing/touch/action
+// {campaign_id, action_type: "confirm"}. The app's renderer sends it
+// right after the action lands, and without it the server keeps putting
+// the same campaign back — every check-in would claim a plan it already
+// has (Gitee iJetLi/deepseek-harness-codearts, src/zcode-upstream.ts's
+// reportZcodeMarketingAction).
+//
+// Only a plan the feed named a campaign for has one to send; a claim
+// that did not land (3012 / 3007 / failed) never sends one — confirm
+// means "this campaign is done with me", so on a failure it would cost
+// the user the plan ("别再给我看了 ⇒ 用户白丢一次领取机会"; cancel is
+// never sent either). The reply is not part of the claim's answer: a
+// receipt that fails is no claim's failure, and is only not recorded.
+async function confirmPlan(s, p) {
+  if (typeof p.campaign_id !== "string" || !p.campaign_id) return false
   try {
-    d = await call("GET", `${ZCODE}${TOUCH}?seq=${touchSeq++}`, { auth: "Bearer " + s.jwt, device: s.device, headers: marketingHeaders() })
-  } catch (e) {
-    unread.push(`gift plans to claim: ${e?.message ?? String(e)}`)
-    // rate is the ms ZCode asked to wait (0 when it sent no Retry-After),
-    // null when this was not a rate limit at all
-    return { plans, unread, rate: e?.status === 429 || e?.code === RATE_LIMITED ? (e.retryAfterMs || 0) : null }
+    await call("POST", `${ZCODE}${MARKETING_ACTION}`, {
+      auth: "Bearer " + s.jwt,
+      device: s.device,
+      headers: marketingHeaders(),
+      body: { campaign_id: p.campaign_id, action_type: "confirm" },
+    })
+    return true
+  } catch {
+    return false
   }
-  const got = touchPlans(d)
-  if (!got) unread.push("gift plans to claim: the plan list doesn't read")
-  else got.forEach(add)
-  return { plans, unread, rate: null }
 }
 
 // RECHECK is how long an "nothing to claim" stands before magpie's loop
@@ -262,15 +418,31 @@ async function toClaim(s) {
 // magpie asks a failed again after 30 minutes of its own.
 const RECHECK_MS = 30 * 60_000
 const recheck = () => new Date(Date.now() + RECHECK_MS).toISOString()
+// NO_PLAN_TODAY is said when both lists read and neither names a plan.
+// It says what was observed — never "already claimed today", which would
+// be a lie (a day's plan not yet handed out has used_units 0) — and
+// gives the one right action: come back later, the server hands the day's
+// plans out as the day goes on. The reference says the same in the same
+// place (Gitee iJetLi/deepseek-harness-codearts, src/zcode-auth.ts's
+// claimDailyWith: "今日暂无可领额度（服务端按日刷新）").
+const NO_PLAN_TODAY = "no ZCode gift plan to claim today (ZCode hands the day's plans out as the day goes on)"
 
 // claimDaily claims every gift plan ZCode offers the account (#503:
-// toClaim, the app's banners and its preview), as auth.checkin's answer:
-// inactive when neither lists one, claimed when one was claimed now,
-// done when each was claimed before, captcha when ZCode wants the app's
-// captcha for one (it is claimed in the ZCode app), ineligible when
-// ZCode is not offering one at that moment (code 1004, read again later
-// in the day), failed when a list
-// or a claim can't be read. A rate-limited read (HTTP 429, or code 3002)
+// toClaim, the preview's daily gift plans and the app's marketing
+// banners), as auth.checkin's answer: inactive when neither lists one,
+// claimed when one was claimed now, done when each was claimed before,
+// captcha when ZCode wants the app's captcha for one (it is claimed in
+// the ZCode app), ineligible when ZCode is not offering one at that
+// moment (code 1004, read again later in the day), failed when no list
+// reads, when a claim can't be read, or when ZCode's risk control has
+// blocked the account (3012 — see UNUSUAL_ACTIVITY: no plan is posted
+// after it, and it carries no `until`).
+// The client's activity is reported before the lists are asked for:
+// ZCode hands the day's plans out by it (reportActivation), and a report
+// that fails is no claim's failure. A list that didn't read is no
+// failure either while the other read a plan — one list being down must
+// not undo the day's claim.
+// A rate-limited read (HTTP 429, or code 3002)
 // is not asked again either: the account is held here until the wait ends
 // (a Retry-After ZCode sent, else the account's own wait doubling from
 // RECHECK_MS, out to RATE_LIMIT_MAX_MS — see RATE_LIMITED), and every ask
@@ -293,20 +465,24 @@ async function claimDaily(s) {
   // own, so holding it is the plugin's job — see RATE_LIMITED)
   const held = rateWait.get(holdKey(s))
   if (held && Date.now() < Date.parse(held.until)) return { outcome: "failed", message: held.message, until: held.until }
+  // the client's activity, before the plans are asked for: without it the
+  // preview answers an empty list and the check-in says "nothing to claim"
+  // on a day ZCode has a plan (reportActivation)
+  await reportActivation(s)
   const { plans, unread, rate = null } = await toClaim(s)
   // a rate-limited read: held here until the wait is over
   if (rate !== null) {
     const message = unread.join("; ") || "ZCode rate limited this account"
     return { outcome: "failed", message, until: noteRateLimit(holdKey(s), rate, message) }
   }
-  // the feed answered and no claim is read: the wait is over. It is not
+  // both lists answered and no claim is read: the wait is over. It is not
   // forgotten before the claims below, so a claim ZCode keeps limiting
   // waits longer each time (see noteRateLimit)
   if (!plans.length) {
     rateWait.delete(holdKey(s))
     return unread.length
       ? { outcome: "failed", message: unread.join("; ") }
-      : { outcome: "inactive", message: "no ZCode gift plan to claim", until: recheck() }
+      : { outcome: "inactive", message: NO_PLAN_TODAY, until: recheck() }
   }
   // a claim ZCode guards with its security check is not posted: the app
   // passes it before each claim and sends the proof in a header, which
@@ -327,7 +503,17 @@ async function claimDaily(s) {
     return { outcome: "captcha", message: plans.map((p) => `${p.name}: ${CAPTCHA_CLAIM}`).join("; ") }
   }
   const got = []
-  for (const p of plans) got.push({ name: p.name, ...(await claimOne(s, p.plan_id)) })
+  for (const p of plans) {
+    const one = { name: p.name, ...(await claimOne(s, p.plan_id)) }
+    got.push(one)
+    // the campaign's receipt, for a plan that was claimed or had been —
+    // never for one that failed (confirmPlan)
+    if (one.outcome === "claimed" || one.outcome === "done") await confirmPlan(s, p)
+    // 3012 is the account's, not one plan's: posting the plans after it
+    // is what raises the cooldown from 30 minutes to 24 hours or a block
+    // (see UNUSUAL_ACTIVITY), so the rest are skipped, not failed
+    if (one.blocked) break
+  }
   const named = (o) => got.filter((g) => g.outcome === o).map((g) => g.name)
   const claimed = named("claimed")
   const said = [
@@ -339,12 +525,17 @@ async function claimDaily(s) {
   ].filter(Boolean).join("; ")
   // a plan claimed now is used by the next request, not ten minutes on
   if (claimed.length) routes.delete(s.key + "\0" + s.jwt)
+  // risk control blocked the account: no `until` on purpose (magpie asks a
+  // failed again by itself, and asking again is what raises the cooldown)
+  if (got.some((g) => g.blocked)) return { outcome: "failed", message: said }
   // a claim ZCode rate limited: the plan may still be there, later
   const limitedClaim = got.find((g) => g.rate !== undefined)
   if (limitedClaim) return { outcome: "failed", message: said, until: noteRateLimit(holdKey(s), limitedClaim.rate, said) }
   rateWait.delete(holdKey(s)) // nothing in this check-in was rate limited: the wait is over
-  // a list that didn't read may hold a plan not claimed: asked again
-  if (unread.length || got.some((g) => g.outcome === "failed")) return { outcome: "failed", message: said }
+  // a claim that didn't read may be a plan still there: asked again (a
+  // list that didn't read is no failure here — the plans it did name were
+  // claimed, and the unread one is named in `said`)
+  if (got.some((g) => g.outcome === "failed")) return { outcome: "failed", message: said }
   if (got.some((g) => g.outcome === "captcha")) return { outcome: "captcha", message: said }
   if (claimed.length) return { outcome: "claimed", message: said }
   // a plan not offered now can be offered later in the day (11-04: an
@@ -356,8 +547,11 @@ async function claimDaily(s) {
 
 export {
   CLAIMED_ALREADY, CAPTCHA, NOT_ELIGIBLE, RATE_LIMITED, RATE_LIMIT_MAX_MS,
+  UNUSUAL_ACTIVITY, UNUSUAL_ACTIVITY_CLAIM,
   rateWait, resetRateWait, holdKey, noteRateLimit, CAPTCHA_WORDS, claimNeedsCaptcha,
-  CAPTCHA_CLAIM, marketingHeaders, claimOne, TOUCH, CLAIM_ACTION, touchSeq,
-  clientLanguage, touchPlans, toClaim, RECHECK_MS, recheck, claimDaily,
+  CAPTCHA_CLAIM, marketingHeaders, claimOne, TOUCH, PREVIEW, MARKETING_ACTION,
+  EVENT_REPORT, ACTIVATION_EVENTS, CLAIM_ACTION, touchSeq,
+  clientLanguage, touchPlans, previewPlans, toClaim, reportActivation, confirmPlan,
+  RECHECK_MS, recheck, NO_PLAN_TODAY, claimDaily,
   CLAIM_HINT, claimHint,
 }

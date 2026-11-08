@@ -5,7 +5,7 @@ author: MYCF711
 # 用法（在一个供应商插件仓库里）：
 #
 #   - uses: actions/checkout@v4
-#   - uses: MYCF711/magpie-plugin-scaffold/.github/actions/check@v0.1.0
+#   - uses: MYCF711/magpie-plugin-scaffold/.github/actions/check@v0.1.1
 #     with:
 #       target: .
 #

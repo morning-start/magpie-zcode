@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 从一个已验证的模板起一个新插件 —— 不可变部分照抄，身份三处自动改掉。
 //
-//   npx --yes github:MYCF711/magpie-plugin-scaffold#v0.1.0 create \
+//   npx --yes github:MYCF711/magpie-plugin-scaffold#v0.1.1 create \
 //     --dir my-plugin --provider huawei --name "华为云 HUAWEI" --package huawei-auth \
 //     --base https://api.huawei.example/v1
 //

@@ -1,6 +1,9 @@
-import test from 'node:test'
+import test, { afterEach, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { billKey, isPositiveGrant, reconcileCheckin } from '../src/checkin.mjs'
+import { claimDaily, claimHint, resetRateWait } from '../src/claim.mjs'
+import { resetClientConfigs } from '../src/catalog.mjs'
+import { APP_VERSION } from '../src/zcode.mjs'
 
 const done = { outcome: 'done', credit: 0, message: '今日已签到' }
 
@@ -149,4 +152,258 @@ test('pointsOf 与 hasRewardBill 可适配其他账单字段', () => {
 
   assert.equal(result.credit, 20)
   assert.equal(result.hasNewRewardBill, true)
+})
+
+// ---- 每日领取（claim）：3012 短路 / 营销回执 / 活跃上报 / 两个来源合并 ----------
+//
+// 这五条语义来自 Gitee iJetLi/deepseek-harness-codearts 的 zcode 签到实现：
+//   src/zcode-auth.ts      claimDailyWith（1467-1600）、claimOnePlan（1630-1786）、
+//                          toClaimOutcome（2171 起）、isClaimUnusualActivity（2352）
+//   src/zcode-upstream.ts  reportZcodeActivation(840)、fetchZcodeClaimablePlans(864)、
+//                          fetchZcodeMarketingPlans(1177)、reportZcodeMarketingAction(1227)、
+//                          mergeZcodeClaimablePlans(1269)、claimZcodePlan(1308)
+// 只对齐语义：不产 captcha（3007 仍是 captcha），outcome 词表仍是
+// claimed / done / inactive / captcha / ineligible / failed。
+
+const realFetch = globalThis.fetch
+const nowSeconds = Math.trunc(Date.now() / 1000)
+const token = ['{}', JSON.stringify({ exp: nowSeconds + 3600 })].map((s) => Buffer.from(s).toString('base64url')).join('.') + '.synthetic'
+const account = { jwt: token, device: '11111111-2222-4333-8444-555555555555' }
+
+// ok / refusal are ZCode's two reply shapes: a body wrapped in {code, data},
+// and a claim's {code, msg} under its own HTTP status.
+const ok = (data) => new Response(JSON.stringify({ code: 0, data }), { headers: { 'content-type': 'application/json' } })
+const refusal = (code, msg, status = 200) => new Response(JSON.stringify({ code, msg }), { status, headers: { 'content-type': 'application/json' } })
+const failedRead = () => new Response('', { status: 502 })
+
+const plan = (id) => ({ plan_id: id, name: `plan ${id}` })
+// delivery is one marketing feed banner: its plan comes from the button's
+// claim_zcode_plan action, its campaign id from the delivery itself.
+const delivery = (campaign, id) => ({ campaign_id: campaign, banner: { buttons: [{ action: { type: 'claim_zcode_plan', args: { plan_id: id } } }] } })
+
+// upstream is a fake ZCode: every path a check-in asks for has a default,
+// and a test overrides the ones it is about. Returns the calls it saw, so a
+// test can assert on what was (and was not) sent.
+function upstream(routes = {}) {
+  const calls = []
+  const table = {
+    '/api/v1/event/report': () => ok({}),
+    '/api/v1/client/configs': () => ok({}),
+    '/api/v1/zcode-plan/billing/preview': () => ok({ plans: [] }),
+    '/api/v1/marketing/touch': () => ok({ deliveries: [] }),
+    '/api/v1/zcode-plan/billing/claim': () => ok({}),
+    '/api/v1/marketing/touch/action': () => ok({}),
+    ...routes,
+  }
+  globalThis.fetch = async (input, init = {}) => {
+    const url = new URL(String(input))
+    const seen = { method: init.method ?? 'GET', url, headers: new Headers(init.headers ?? {}), body: init.body === undefined ? undefined : JSON.parse(init.body) }
+    calls.push(seen)
+    return (await table[url.pathname]?.(seen)) ?? new Response('', { status: 404 })
+  }
+  return calls
+}
+const claims = (calls) => calls.filter((c) => c.url.pathname === '/api/v1/zcode-plan/billing/claim').map((c) => c.body.plan_id)
+const receipts = (calls) => calls.filter((c) => c.url.pathname === '/api/v1/marketing/touch/action').map((c) => c.body)
+const reports = (calls) => calls.filter((c) => c.url.pathname === '/api/v1/event/report')
+
+beforeEach(() => {
+  // the account's rate-limit hold and zcode.z.ai's client config are both
+  // module-level: one test's must not answer the next one's
+  resetRateWait()
+  resetClientConfigs()
+})
+afterEach(() => {
+  globalThis.fetch = realFetch
+})
+
+// ① 3012 = 账号级风控，必须短路
+test('3012 是账号级风控：第一个 plan 撞上后不再发剩余 plan', async () => {
+  const calls = upstream({
+    '/api/v1/zcode-plan/billing/preview': () => ok({ plans: [plan('p1'), plan('p2')] }),
+    '/api/v1/zcode-plan/billing/claim': () => refusal(3012, 'request has been blocked due to unusual activity.', 405),
+  })
+
+  const out = await claimDaily(account)
+
+  // ★ 只发了第一发：连发剩余 plan 就是一次点击连撞 N 次风控
+  assert.deepEqual(claims(calls), ['p1'])
+  assert.equal(out.outcome, 'failed')
+  // ★ 风控不带 until：magpie 会按 until 重试，而重试正是加重冷却
+  assert.equal(out.until, undefined)
+  // 文案说清「账号级风控、冷却 30 分钟起、别连续重试」
+  assert.match(out.message, /risk control/)
+  assert.match(out.message, /unusual activity/)
+  assert.match(out.message, /30 minutes/)
+  assert.match(out.message, /don't retry/)
+  // 没领到就不发回执
+  assert.deepEqual(receipts(calls), [])
+})
+
+// 对照组：3007 方向相反（换个新 param 就能过），不得被 3012 的短路带走
+test('3007 不短路：每个 plan 都发，且文案里没有风控措辞', async () => {
+  const calls = upstream({
+    '/api/v1/zcode-plan/billing/preview': () => ok({ plans: [plan('p1'), plan('p2')] }),
+    '/api/v1/zcode-plan/billing/claim': () => refusal(3007, 'captcha verify failed', 400),
+  })
+
+  const out = await claimDaily(account)
+
+  assert.deepEqual(claims(calls), ['p1', 'p2'])
+  assert.equal(out.outcome, 'captcha')
+  assert.doesNotMatch(out.message, /risk control/)
+  assert.deepEqual(receipts(calls), [])
+})
+
+// ② 营销回执（confirm）
+test('营销回执：领到的 plan 带 campaign id 时发一次 confirm', async () => {
+  const calls = upstream({ '/api/v1/marketing/touch': () => ok({ deliveries: [delivery('c-1', 'p1')] }) })
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'claimed')
+  assert.deepEqual(receipts(calls), [{ campaign_id: 'c-1', action_type: 'confirm' }])
+})
+
+test('营销回执：1003（已领取）仍要回执 —— 那正是「已处理完」', async () => {
+  const calls = upstream({
+    '/api/v1/marketing/touch': () => ok({ deliveries: [delivery('c-1', 'p1')] }),
+    '/api/v1/zcode-plan/billing/claim': () => refusal(1003, 'target already exists'),
+  })
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'done')
+  assert.equal(receipts(calls).length, 1)
+})
+
+test('营销回执：没领到（1005）时绝不发 confirm', async () => {
+  const calls = upstream({
+    '/api/v1/marketing/touch': () => ok({ deliveries: [delivery('c-1', 'p1')] }),
+    '/api/v1/zcode-plan/billing/claim': () => refusal(1005, 'exceed quota limit', 400),
+  })
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'failed')
+  assert.deepEqual(receipts(calls), [])
+})
+
+test('营销回执：回执失败不影响领取结果', async () => {
+  const calls = upstream({
+    '/api/v1/marketing/touch': () => ok({ deliveries: [delivery('c-1', 'p1')] }),
+    '/api/v1/marketing/touch/action': () => refusal(5000, 'receipt failed'),
+  })
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'claimed')
+  assert.equal(receipts(calls).length, 1)
+})
+
+// ③ 补活跃上报
+test('补活跃上报：列 plan 之前先发 app_launch 与 app_daily_active', async () => {
+  const calls = upstream({ '/api/v1/zcode-plan/billing/preview': () => ok({ plans: [plan('p1')] }) })
+
+  await claimDaily(account)
+
+  assert.deepEqual(reports(calls).map((c) => c.body.event), ['app_launch', 'app_daily_active'])
+  assert.equal(reports(calls)[0].method, 'POST')
+  assert.equal(reports(calls)[0].body.device_mid, account.device)
+  assert.equal(reports(calls)[0].body.app_version, APP_VERSION)
+  // 先上报、后列 plan
+  const firstReport = calls.findIndex((c) => c.url.pathname === '/api/v1/event/report')
+  const firstList = calls.findIndex((c) => c.url.pathname === '/api/v1/zcode-plan/billing/preview')
+  assert.ok(firstReport >= 0 && firstReport < firstList)
+})
+
+test('补活跃上报失败不让签到变 failed（降级为「没上报」继续）', async () => {
+  // 两个列表都读到了、只是今天没有可领 —— 上报挂了不该把 inactive 变成 failed
+  upstream({ '/api/v1/event/report': () => new Response('', { status: 500 }) })
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'inactive')
+  assert.ok(out.until)
+})
+
+// ④ preview + marketing/touch 合并去重
+test('preview 与营销 feed 合并去重，campaign id 补到同名 plan 上', async () => {
+  const calls = upstream({
+    '/api/v1/zcode-plan/billing/preview': () => ok({ plans: [plan('same'), plan('daily')] }),
+    '/api/v1/marketing/touch': () => ok({ deliveries: [delivery('c-same', 'same'), delivery('c-feed', 'feed')] }),
+  })
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'claimed')
+  // preview 在前、feed 补充；同一个 plan id 只领一次
+  assert.deepEqual(claims(calls), ['same', 'daily', 'feed'])
+  // 同名 plan 的回执用的是 feed 补上的 campaign id
+  assert.deepEqual(receipts(calls), [
+    { campaign_id: 'c-same', action_type: 'confirm' },
+    { campaign_id: 'c-feed', action_type: 'confirm' },
+  ])
+})
+
+// ⑤ 一个来源失败只是降级
+test('营销 feed 挂了不影响 preview 那条主路径', async () => {
+  const calls = upstream({
+    '/api/v1/zcode-plan/billing/preview': () => ok({ plans: [plan('daily')] }),
+    '/api/v1/marketing/touch': () => failedRead(),
+  })
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'claimed')
+  assert.deepEqual(claims(calls), ['daily'])
+})
+
+test('preview 挂了、feed 有 plan：feed 的照领', async () => {
+  const calls = upstream({
+    '/api/v1/zcode-plan/billing/preview': () => failedRead(),
+    '/api/v1/marketing/touch': () => ok({ deliveries: [delivery('c-1', 'p1')] }),
+  })
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'claimed')
+  assert.deepEqual(claims(calls), ['p1'])
+})
+
+test('两个来源都读不到才是 failed（不带 until）', async () => {
+  upstream({
+    '/api/v1/zcode-plan/billing/preview': () => failedRead(),
+    '/api/v1/marketing/touch': () => failedRead(),
+  })
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'failed')
+  assert.match(out.message, /plan list/)
+  assert.match(out.message, /marketing feed/)
+  assert.equal(out.until, undefined)
+})
+
+// ⑥ 没 plan 的文案
+test('两个来源都没有 plan：inactive + 服务端按日刷新的文案', async () => {
+  const calls = upstream()
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'inactive')
+  assert.ok(out.until)
+  assert.match(out.message, /no ZCode gift plan to claim today/)
+  assert.deepEqual(claims(calls), [])
+})
+
+// 卡片那一行只读营销 feed：preview 的赠送计划没有横幅可报，而且卡片读取
+// 不得多打一发（tests/usage.test.mjs 钉住了「卡片不请求 preview」）。
+test('卡片那行只读营销 feed，不请求 preview', async () => {
+  const calls = upstream({ '/api/v1/marketing/touch': () => ok({ deliveries: [delivery('c-1', 'p1')] }) })
+
+  const line = await claimHint(account)
+
+  assert.deepEqual(calls.map((c) => c.url.pathname), ['/api/v1/marketing/touch'])
+  assert.equal(line.display, '1 · p1')
 })
