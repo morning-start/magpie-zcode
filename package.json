@@ -1,0 +1,77 @@
+{
+  "name": "unnamed-plugin",
+  "version": "0.3.12",
+  "description": "A magpie / OpenCode provider plugin scaffold: all nine hooks implemented in one file, plus the enforceable rules a provider plugin must pass — icon in two places, MIT license, no helper functions exported, no secrets. Clone it, implement five functions, run the check.",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": "./index.mjs",
+  "bin": {
+    "magpie-plugin": "./scripts/cli.mjs"
+  },
+  "files": [
+    "index.mjs",
+    "src",
+    "README.md",
+    "README-TEMPLATE.md",
+    "AGENTS.md",
+    "CHECKLIST.md",
+    "HOOKS.md",
+    "UPDATING.md",
+    "CHANGELOG.md",
+    "MULTI-PROVIDER.md",
+    "NOTICE.md",
+    "LICENSE",
+    "extract-contract.py",
+    "registry-entry.json",
+    "tests",
+    "scripts",
+    "examples",
+    "ERROR-CODES.md",
+    "RECYCLING.md",
+    "GUIDE.md",
+    "OFFICIAL-SOURCES.md",
+    "SCORING.md",
+    "CONTRIBUTING.md"
+  ],
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "opencode",
+    "opencode-plugin",
+    "opencode-auth",
+    "provider",
+    "template",
+    "boilerplate",
+    "checkin"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MYCF711/magpie-plugin-scaffold.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MYCF711/magpie-plugin-scaffold/issues"
+  },
+  "homepage": "https://github.com/MYCF711/magpie-plugin-scaffold#readme",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "magpie": {
+    "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMjggMTI4Ij48cmVjdCB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyOCIgcng9IjI4IiBmaWxsPSIjMWYyOTM3Ii8+PHRleHQgeD0iNjQiIHk9Ijg0IiBmb250LXNpemU9IjYwIiBmb250LWZhbWlseT0ic3lzdGVtLXVpLHNhbnMtc2VyaWYiIGZvbnQtd2VpZ2h0PSI3MDAiIGZpbGw9IiM2MGE1ZmEiIHRleHQtYW5jaG9yPSJtaWRkbGUiPkE8L3RleHQ+PC9zdmc+",
+    "maxConcurrency": 4,
+    "name": "⚠ 未命名插件 Unnamed Plugin"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node scripts/check.mjs",
+    "check:errors": "node scripts/check-error-codes.mjs .",
+    "check:template": "node scripts/check.mjs --template",
+    "check:ua": "node scripts/check-ua.mjs .",
+    "create": "node scripts/create.mjs",
+    "release": "node scripts/release.mjs",
+    "score": "node scripts/score.mjs",
+    "maintenance": "node scripts/check-maintenance.mjs",
+    "check:actions": "node scripts/check-actions.mjs",
+    "publish:npm": "node scripts/publish-npm.mjs"
+  }
+}

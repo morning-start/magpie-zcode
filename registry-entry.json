@@ -1,0 +1,9 @@
+{
+  "package": "your-package-name",
+  "name": "⚠ 未命名插件 Unnamed Plugin",
+  "providers": ["your-provider-id"],
+  "summary": {
+    "en": "One sentence: what it signs in to, and what the user gets.",
+    "zh": "一句话：签入什么服务，用户得到什么。"
+  }
+}
