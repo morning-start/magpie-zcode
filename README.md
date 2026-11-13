@@ -1,177 +1,113 @@
-# 智谱 ZCode
+# 智谱 ZCode for magpie
 
-像 [ZCode](https://zcode.z.ai) 自己那样登录 Z.ai 或智谱（BigModel）的 **GLM Coding Plan**，
-把这个计划的 GLM 模型按 Anthropic Messages 形状接到 magpie 里。Provider id：`zcode`。
+像 ZCode 自己那样登录 Z.ai / 智谱的 **GLM Coding Plan**，把 GLM 模型按 Anthropic Messages 形状接进 magpie。Provider id：`zcode`。
 
-它做四件事：
-
-1. **登录** —— ZCode 的 OAuth 流程（浏览器里签 Z.ai 或智谱）、团队席位、ZCode App 自己的
-   登录态，以及直接粘 API key；
-2. **路由** —— 账号有 Coding Plan 就用它；没有就找团队席位；再没有就用 ZCode 的免费
-   **Start Plan**（请求按 ZCode 自己的形状整形，否则 zcode.z.ai 回 405）；
-3. **额度卡片** —— Coding Plan 的 5 小时 / 周窗口与套餐、团队席位、Start Plan 的 bucket，
-   时间统一转成 ISO，`aside` 窗口只上卡片；
-4. **每日领取** —— ZCode 的赠送计划由插件替用户领：preview 与营销 feed 合并去重，
-   领取前的阿里云无感验证由受控浏览器自动过（过不去才交给 ZCode App）。
-
-## 安装
-
-```bash
-magpie plugin add morning-start/magpie-zcode
+```text
+4 种登录方式   ·  Coding Plan / 团队席位 / 免费 Start Plan 三条通道
+5 小时 / 周 / 月窗口  ·  签到自动过阿里云验证码  ·  模型跟随 ZCode 官方目录
 ```
 
-装好之后在 magpie 的「供应商」里选一种登录方式（见下）。`provider.models` 会按当前账号
-的计划给出模型列表；未登录时退回 ZCode 的静态表（`GLM-5.3` / `GLM-5.3-Flash` / `GLM-5.2` /
-`GLM-5-Turbo`），所以卡片不会显示 0 个模型。
+---
 
-## 登录方式
+## 功能
 
-- **ZCode: Z.ai GLM Coding Plan** / **ZCode: BigModel (智谱) GLM Coding Plan**
-  - zcode.z.ai 打开一个登录流程，浏览器里签 Z.ai 或智谱，插件轮询到完成为止 —— 不需要粘贴任何东西。
-  - 拿到登录态后，它在账号的默认项目里找名为 `zcode-api-key` 的 key，没有就建一个，
-    再读它的 secret（`<id>.<secret>`），请求发到 `api.z.ai/api/anthropic` 或
-    `open.bigmodel.cn/api/anthropic`。
-  - 账号自己没有计划时，它去找团队计划里的席位，用那个团队项目的 `zcode-team-api-key`。
-  - 两者都没有，就用 ZCode 的免费 **Start Plan**（zcode.z.ai 用 ZCode 自己的会话 token 服务）。
-  - Start Plan 的 token 不能续期，过期就重新登录。
-- **ZCode: a team's GLM Coding Plan** —— 把「团队席位」单独当成一个账号（ZCode 的计划选择器里
-  团队计划和个人计划是并列的两项）。
-- **ZCode app's sign-in** —— 跟着本机 ZCode App 的登录态走：读
-  `~/.zcode/v2/credentials.json`（AES-256-GCM 加密，密钥由机器用户名派生），
-  包括 3.14 的「数据存储路径」、3.15 的 `config.json` 密钥、3.16 的 `project-key-location`。
-  ZCode 换账号、续会话、切计划，插件跟着变；ZCode 退出登录就报「登录已失效」。
-- **GLM Coding Plan API key** —— 直接粘 key（`<id>.<secret>`），选 Z.ai 还是智谱。
+- **登录** —— ZCode 的 OAuth（浏览器里签 Z.ai 或智谱）、团队席位、跟随本机 ZCode App 的登录态、直接粘 API key：四种任选。
+- **路由** —— 账号有 Coding Plan 就用它；没有就找团队席位；再没有就用 ZCode 的免费 **Start Plan**。
+- **额度卡片** —— Coding Plan 的 5 小时 / 周 / 月窗口、套餐与续费、还能重置几次；团队席位与 Start Plan 的 bucket 各自成窗口。
+- **每日领取** —— 自动领 ZCode 的赠送计划（preview + 营销 feed 合并去重），领取前的阿里云**无感验证由受控浏览器自动过**。
+- **模型目录** —— 读 ZCode 自己的 provider 配置；`-Trial` 条目就是赠送额度的模型；登录失效时退回静态表，卡片不会空。
+- **并发与退避** —— Start Plan 每账号 3 个在飞请求；被拒按 ZCode 客户端的节奏重试；整机被防火墙盯上时暂停 3 分钟。
 
-## 请求怎么路由
+---
 
-| 账号状态 | 请求去哪 | 说明 |
+## 模型
+
+**智谱 / Z.ai 的 GLM 系列** —— 登录后跟随 ZCode 官方配置上下架。
+
+| 发行商 | 代表模型 | 说明 |
 |---|---|---|
-| 有 Coding Plan（个人） | `api.z.ai/api/anthropic` 或 `open.bigmodel.cn/api/anthropic` | 用 `zcode-api-key` |
-| 只有团队席位 | 团队项目对应的计划 | 用 `zcode-team-api-key`，首次读取后会存回账号 |
-| 两者都没有，有 Start Plan | `zcode.z.ai/api/v1/zcode-plan/anthropic` | 请求按 ZCode 的形状整形（见下） |
-| 有 Coding Plan，也有赠送额度 | 默认：普通模型**先**花赠送额度（`-Trial` 条目），被拒回落到计划 | 「优先用免费额度」开关，`freeFirst: false` 可关 |
+| 智谱 / Z.ai | `GLM-5.3` | 旗舰 |
+| 智谱 / Z.ai | `GLM-5.3-Flash` | 快速档 |
+| 智谱 / Z.ai | `GLM-5.2` / `GLM-5-Turbo` | 热门 |
+| 智谱 / Z.ai | `<模型>-Trial` | 赠送额度服务；选择器里就是「用赠送额度」 |
 
-Start Plan 只服务「看起来像 ZCode 自己发的」请求，所以插件把它改写成 ZCode 的样子：
+> 只列代表。模型目录随时上下架，全量以装好后的 `magpie plugin list` 为准。
 
-- ZCode 自己的请求头（`X-Title: Z Code@electron`、`X-ZCode-App-Version`、`X-Platform`、
-  `X-Os-Category`、`X-Release-Channel` 等）；
-- 三段缓存 system block，agent 自己的 system 文本接在第三段末尾（第四段会被 405/3012 拒）；
-- 当天日期作为一个 `<system-reminder>` 用户轮次放在最前；
-- `metadata.user_id` 带登录态的 device id（计划端点按它认机器、保 prompt 缓存）；
-- 每次用户轮次一个 `x-query-id`（UUID，同一轮的 tool 结果复用）；
-- 每个请求带 `x-session-id`（Agent 的会话 id 是 UUID 就用它，否则按它算一个稳定的 UUID）。
-
-Coding Plan 的请求基本原样转发，只补 `metadata.user_id` 与 `x-session-id`。
-
-Claude Code 的 `ToolSearch` 会以 `ToolSearchTool` 发出去（否则计划端点只给模型看这一个工具），
-模型对它的调用再改回 `ToolSearch`。`-Trial` 条目就是赠送额度的模型名。
-
-## 并发与退避
-
-- **Start Plan**：每账号同时最多 3 个在飞请求（`startGate`，进程内存），多的排队等；
-  等到 120 秒还没轮上就回 429（带 `Retry-After`），magpie 会换账号而不是空转。
-- **被拒**：ZCode 的 3008/3009/3010（「当前系统繁忙」）是并发上限，不是计划用尽 ——
-  按 ZCode 自己的客户端 1s、2s 再问；再不行把 429 交回 magpie。
-- **防火墙**：一分钟内 5 次「重问之后还是 3008」说明这台机器把地址打满了，
-  插件让整个进程暂停 3 分钟（只暂停 Start Plan 的模型请求，额度读取和签到照常），
-  免得 IP 被 Aliyun 防火墙 405 一两个小时。
-- **Coding Plan 不设插件自己的闸**：它的上限跟套餐档位（Max > Pro > Lite）和时段有关，
-  写死一个数字会把 Max 账号压到 Lite 的水平。这里用 magpie 的 `maxConcurrency: 3` 排队。
-
-## 额度卡片
-
-`auth.usage` 返回：
-
-- **Coding Plan**：5 小时 / 周的百分比与「已用 / 总量」，套餐名（`GLM Coding Pro` 之类）、
-  到期与是否自动续费、还能用几次重置（个人 / 团队）；
-- **团队席位**：团队的 5 小时 / 周窗口、计划名与结束时间；
-- **Start Plan**：每个 live 计划下每个 bucket 一条窗口，名字是 ZCode 的 `show_name`
-  （多个计划时后面缀上计划名），已花的 bucket 标 `aside`（只上卡片、不参与路由）；
-  还没开始的计划单独一行（`aside` + 计划名与开始时间）；
-- **脚注**：MCP 月调用数（`aside`，排最后）；key 没有计划、或 ZCode 会话过期时，
-  卡上会说明为什么没有 `-Trial` 模型；营销 feed 里挂着没领的赠送计划也会列一行。
-
-所有时间都转成 ISO；`aside` 的窗口不给 `amount`/`limit`（否则会算出「永远剩余 100%」的假占比）。
+---
 
 ## 每日领取
 
-`auth.checkin` 领 ZCode 的赠送计划：`billing/preview` 的每日赠送 + 营销 feed
-（`/api/v1/marketing/touch`）里投放的活动，按 plan id 合并去重。
+`auth.checkin` 领 ZCode 的赠送计划：`billing/preview` 的每日赠送 + 营销 feed（`/api/v1/marketing/touch`）里投放的活动，按 plan id 合并去重，领到后给营销活动回执。
 
-ZCode 的领取被阿里云验证码守着（`client/configs` 的 `data.configs.captcha`）。
-插件照 ZCode 客户端自己的做法过这一关：开一个受控 Chromium（屏幕外的**真窗口**，
-不是 headless——无感验证看指纹），页面载入阿里云官方 SDK 跑**无感验证**，把
-`captchaVerifyParam` 放进 `X-Aliyun-Captcha-Verify-Param` 再领，和 zcode-switch
-1.7.x 的隐藏 Webview 同一条路。解不出（机器上没有 Chromium、无感要人工、45 秒超时）
-才退回 `captcha`，让用户去 ZCode App 手动领。每次领取都带该账号自己的
-`X-Device-Mid`（服务端按 `device_mid` + 日期去重，多号共用一个会被互相顶掉）。
+ZCode 的领取被阿里云验证码守着。插件照 ZCode 客户端自己的做法过这一关：开一个屏幕外的受控 Chromium（**真窗口**，不是 headless——无感验证看指纹），页面载入阿里云官方 SDK 跑无感验证，把 `captchaVerifyParam` 放进 `X-Aliyun-Captcha-Verify-Param` 再领。解不出（机器上没有 Chromium、无感要人工、45 秒超时）才退回 `captcha`，让用户去 ZCode App 手动领。
 
-- `claimed` —— 刚领到；
-- `done` —— 今天已经领过（1003）；
-- `inactive` —— 现在没有可领的计划，半小时后再问（计划常在白天才投放）；
-- `captcha` —— 安全验证过不去（没有可用浏览器 / 要人工验证），去 ZCode App 里领；
-- `ineligible` —— 这个计划此刻不对这个账号开放（1004），或今日名额已用完
-  （1005，按 `data.plan.ends_at` 再问）；
-- `failed` —— 读不到、或限流（3002）：按厂商的 `Retry-After`（没有就从 30 分钟翻倍，
-  最多 6 小时）挂起，等待期内不再打上游。
-
-## 模型目录
-
-ZCode 的模型表在它自己的 provider 配置里，插件读 revision 更新的那份：
-
-- 在线：`/api/v1/client/configs` 给出的 `builtin_provider_config_json` 地址；
-- 离线：已安装 ZCode 的 `~/.zcode/v2/runtime/provider/**/zcode-builtin.json`
-  （macOS 另含 `/Applications/ZCode.app/Contents/Resources/config/provider/zcode-builtin.json`）。
-
-两份都读不到时用静态表（`GLM-5.3` / `GLM-5.3-Flash` / `GLM-5.2` / `GLM-5-Turbo`），
-并给 magpie 打 `magpie.fellBack` 标记让它保留上次的列表。
-赠送额度服务的模型以 `<模型>-Trial` 出现，`-Trial` 条目在选择器里就是「用赠送额度」。
-
-## 架构
-
-`index.mjs` **只做九项钩子的装配**，实现全部在 `src/`：
-
-| 文件 | 管什么 |
+| outcome | 含义 |
 |---|---|
-| [`src/zcode.mjs`](./src/zcode.mjs) | 身份、端点、`app_version`、静态模型表、纯函数（uuid / jwt / 时间 / 数字） |
-| [`src/zai-call.mjs`](./src/zai-call.mjs) | Z.ai 风格 JSON 端点调用（`{code,msg,data}` 信封、`ZError`、`Retry-After`） |
-| [`src/keys.mjs`](./src/keys.mjs) | 把登录态换成计划自己的 API key（默认项目里的 `zcode-api-key`、团队 key） |
-| [`src/signin.mjs`](./src/signin.mjs) | 登录流程：OAuth 轮询、Coding Plan、团队席位、Start Plan 的兜底 |
-| [`src/own.mjs`](./src/own.mjs) | 跟随 ZCode App 自己的登录（`~/.zcode/v2`、加密凭据、key location） |
-| [`src/session.mjs`](./src/session.mjs) | 把 magpie 存的 auth 还原成请求要的 `{site, base, key, jwt, device}` |
-| [`src/plan.mjs`](./src/plan.mjs) | 请求该走哪条路（`plansOf` 缓存）、限流/拒绝的短时记忆 |
-| [`src/gift.mjs`](./src/gift.mjs) | 赠送额度（Start Plan）余额读取与 bucket 归属 |
-| [`src/allowance.mjs`](./src/allowance.mjs) | 额度卡片：Coding 窗口、团队席位、Start Plan、重置次数 |
-| [`src/claim.mjs`](./src/claim.mjs) | 每日领取（`auth.checkin`）、限流挂起 |
-| [`src/captcha.mjs`](./src/captcha.mjs) | 领取的安全验证：受控浏览器跑阿里云无感验证，拿 `captchaVerifyParam` |
-| [`src/catalog.mjs`](./src/catalog.mjs) | ZCode provider 配置 → 模型条目（`provider.models`） |
-| [`src/start.mjs`](./src/start.mjs) | Start Plan 请求整形（头、`dress`、`queryOf`、ToolSearch 改名） |
-| [`src/concurrency.mjs`](./src/concurrency.mjs) | 在飞并发闸、被拒重试、整机防火墙挂起 |
-| [`src/answer.mjs`](./src/answer.mjs) | 回答原样交回（`kept`）、200 里的「额度用尽」说成 429 |
-| [`src/loader.mjs`](./src/loader.mjs) | 请求接管（`auth.loader`）：选路、整形、重试、槽位释放 |
-| [`src/prompt.mjs`](./src/prompt.mjs) | ZCode 自己的 system 文本（3.17.2） |
+| `claimed` | 刚领到 |
+| `done` | 今天已经领过（1003） |
+| `inactive` | 现在没有可领的计划，半小时后再问（计划常在白天才投放） |
+| `captcha` | 安全验证过不去（没有可用浏览器 / 要人工），去 ZCode App 里领 |
+| `ineligible` | 这个计划此刻不对这个账号开放（1004），或今日名额已用完（1005，按 `data.plan.ends_at` 再问） |
+| `failed` | 读不到或限流（3002）：按厂商的 `Retry-After` 挂起（没有就从 30 分钟翻倍，最多 6 小时） |
 
-`src/` 里其余模块（`http.mjs`、`quota.mjs`、`store.mjs`、`usage-cache.mjs`、`models.mjs` 等）
-是 magpie 插件模板带的通用层，本插件没用到，但它们的测试仍在跑。
+---
 
-## 开发
+## 安装
+
+在 magpie 的 **插件 → 发现** 里搜 `ZCode`，点**安装**，再到「供应商」里选一种登录方式。
+
+### 命令行
 
 ```bash
-node --test                      # 全部测试（含上游移植过来的 17 个套件）
-node scripts/check.mjs           # 交付门：身份、图标、错误码、UA、registry 条目
-node scripts/check-error-codes.mjs .   # 只查错误出口
-node scripts/check-ua.mjs .      # 只查出站 User-Agent
-npm pack --dry-run               # 看发布包里有什么
+# 从 npm（推荐）
+magpie plugin add magpie-zcode
+
+# 从仓库源码（拿最新代码，不走 npm）
+magpie plugin add github:morning-start/magpie-zcode
 ```
 
-测试跑在 node 上，`tests/support/` 提供三个兼容层：
+装完确认：
 
-- `bun-test.mjs` —— 上游 `bun:test` 的 `test` / `expect` / 生命周期 / `spyOn`（语义对齐 bun）；
-- `home.mjs` —— 把 `homedir` 指到一次性目录（Windows 上同时设 `HOME` 与 `USERPROFILE`）；
-- `bun.mjs` —— `Bun.serve` / `Bun.sleep`，用本地服务器当假上游。
+```bash
+magpie plugin list
+# 智谱 ZCode  on
+#   zcode (智谱 ZCode, N models)  signed in as <账号>
+```
 
-⚠ 测试不许读写真家目录里的 `~/.zcode`；`home.mjs` 没装到第一行就会读到用户自己的登录态。
+⚠ 改了代码要 **bump `version`** 再打包 —— 同一版本号重打，bun 会命中缓存（输出 `no changes`）。
+
+---
+
+## 常见问题
+
+**登录后额度卡片是空的？** 先看账号有没有计划：没有 Coding Plan 也没有团队席位时，卡片只列 Start Plan 的 bucket；ZCode 会话过期会在卡上说明原因。
+
+**签到一直失败？** 先看错误码：`Unauthorized` 是登录态过期（重新登录）；`3007` 是验证码，插件会自动过，机器上没有 Chromium 才退回 `captcha`；`3002` 是限流，等 `Retry-After` 即可。
+
+**模型比 ZCode 客户端里少？** 插件读 ZCode 自己的 provider 配置，没登录时用静态表兜底；登录后两边应该一致，不一致多半是 ZCode 那边还没刷新目录。
+
+**Start Plan 是什么？** ZCode 给未订阅账号的免费额度通道。插件把请求改写成 ZCode 自己的形状（否则 `zcode.z.ai` 回 405），三个并发上限、被拒按客户端节奏重试。
+
+**和 ZCode 客户端同时登录会互相影响吗？** 不会。插件用自己的 device id 和登录态，互不覆盖；但同一账号的领取是幂等的，谁先领谁生效。
+
+**为什么要开浏览器？** 领取前的阿里云无感验证只能在浏览器里跑。插件开的是屏幕外的一次性窗口，跑完就关、profile 立刻删除；全程串行，多账号不会同时弹一堆。
+
+---
+
+## 参考源
+
+| 来源 | 用在哪 |
+|---|---|
+| [pjpv/zcode-switch](https://github.com/pjpv/zcode-switch)（MIT） | 领取链路（preview / claim / `X-Aliyun-Captcha-Verify-*` 头）、失败码语义、`1005` 的 `ends_at` |
+| [iJetLi/deepseek-harness-codearts](https://gitee.com/iJetLi/deepseek-harness-codearts) | 签到合并去重、活跃上报、营销回执 |
+| ZCode 客户端 / [magpie 插件脚手架](https://github.com/MYCF711/magpie-plugin-scaffold) | 模型目录、额度窗口与九项钩子契约 |
+
+完整的版权声明与逐段出处见 [NOTICE.md](./NOTICE.md)。
+
+---
+
+> 更新记录：[CHANGELOG.md](./CHANGELOG.md)
 
 ## 许可
 
-MIT。归属说明见 [NOTICE.md](./NOTICE.md)。
+MIT。

@@ -275,6 +275,7 @@ node scripts/app-icon.mjs <installer.exe> --size 256 --out icon.png
 | [OFFICIAL-SOURCES](./OFFICIAL-SOURCES.md) | **官方 22 个锚点 → 本仓库的映射**；每条结论的官方出处 + 版本基线 + 我们补的 8 条 | 想知道「这条规矩官方有没有写」时 |
 | [SCORING](./SCORING.md) | 100 分怎么算、80 分卡在哪、`node scripts/score.mjs` | 交付前自评时 |
 | [README](./README.md) | 这个模板的设计原则：最小交付面、九项清单、三条铁律、常见坑 | 开工前 |
+| [docs/internals.md](./docs/internals.md) | 实现细节：路由 / 并发 / 额度卡片 / 领取链路取证 / 验证码浏览器 / 架构表 / 开发命令 | 要改代码、或想知道 README 里那句「为什么」时 |
 | [HOOKS.md](./HOOKS.md) | 21 章钩子契约（**字段级**：少写/写错会怎样。官方文档讲行为，两者并用；`auth.checkin` 已于 v0.1.1582 补进官方文档） | 写代码时按钩子查 |
 | [MULTI-PROVIDER.md](./MULTI-PROVIDER.md) | 一个包两个供应商（国内/国际）：判据、骨架、五条铁律 | 只有多站点时 |
 | [UPDATING.md](./UPDATING.md) | 功能分支 + PR + `rules` 门禁、进 main 后的受控发布、用户怎么拿到 | **每次发布前** |

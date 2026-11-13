@@ -11,6 +11,7 @@
   "files": [
     "index.mjs",
     "src",
+    "docs",
     "README.md",
     "README-TEMPLATE.md",
     "AGENTS.md",
@@ -67,6 +68,7 @@
   "scripts": {
     "test": "node --test",
     "check": "node scripts/check.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
     "check:errors": "node scripts/check-error-codes.mjs .",
     "check:template": "node scripts/check.mjs --template",
     "check:ua": "node scripts/check-ua.mjs .",
