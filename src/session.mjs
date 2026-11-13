@@ -29,12 +29,16 @@ function stateOf(auth) {
     }
     const site = siteOf(s.site)
     const key = s.key ?? (s.jwt ? "" : auth.access)
-    return { ...s, site, base: s.base || SITES[site].base, key, device: s.device || (key ? keyDevice(key) : anyDevice) }
+    // uid is the account's own id, kept beside the name (magpie tells two
+    // accounts of one name apart by it). ZCode's event report wants it as
+    // user_id (src/claim.mjs's reportActivation): an empty one is a report
+    // the server may not count, and the day's plans never appear.
+    return { ...s, site, base: s.base || SITES[site].base, key, uid: String(auth.uid ?? s.uid ?? ""), device: s.device || (key ? keyDevice(key) : anyDevice) }
   }
   if (auth?.type === "api") {
     const site = siteOf(auth.metadata?.site)
     const key = String(auth.key ?? "").trim()
-    return { site, base: SITES[site].base, key, device: key ? keyDevice(key) : anyDevice }
+    return { site, base: SITES[site].base, key, uid: String(auth.uid ?? ""), device: key ? keyDevice(key) : anyDevice }
   }
   return null
 }

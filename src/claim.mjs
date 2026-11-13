@@ -6,11 +6,19 @@
 // 安全验证（3007）、是不是限流（3002）、是不是账号级风控（3012，命中即停）。
 // 领到之后还要给营销活动回执（confirm）。限流的等待记在本进程里，
 // 等待期内不再打上游（magpie 的 429 退避与厂商的「频率过高」不是一回事）。
+//
+// 安全验证（3007）按 ZCode 客户端自己的做法办：先在 client/configs 里看它开没开，
+// 开了就用受控浏览器跑一次阿里云无感验证，把 captchaVerifyParam 放进
+// X-Aliyun-Captcha-Verify-Param（见 src/captcha.mjs）—— 和 zcode-switch 1.7.x
+// 隐藏 Webview 的做法同一条路。解不出（没有浏览器 / 无感要人工 / 超时）才退回
+// captcha 结果，让用户去 ZCode App 手动领。
 
-import { ZCODE, APP_VERSION, UA, platform, first, anyDevice, STATUS_TEXT, jwtExpired, EXPIRED, sleep } from "./zcode.mjs"
+import { ZCODE, APP_VERSION, UA, platform, first, keyDevice, uuid, STATUS_TEXT, jwtExpired, EXPIRED, sleep } from "./zcode.mjs"
 import { call, retryAfterMs } from "./zai-call.mjs"
 import { clientConfigs } from "./catalog.mjs"
 import { routes } from "./plan.mjs"
+import { captchaOf, solveCaptchaSerially } from "./captcha.mjs"
+import os from "node:os"
 
 // CLAIM_HINT is the claim line's name: a fixed sentence, so magpie
 // translates it with the interface's own language (the plan's name and
@@ -73,6 +81,13 @@ const UNUSUAL_ACTIVITY_CLAIM = "ZCode's risk control blocked this account for un
 // 1004 under 3.16.3's header, and four of them claimed with code 0 under
 // 3.17.2's, one night, with nothing else changed).
 const NOT_ELIGIBLE = 1004
+// QUOTA_EXHAUSTED is /billing/claim's body code for a plan whose daily
+// quota is used up: HTTP 400 {"code":1005,"msg":"exceed quota limit"}.
+// The answer carries data.plan.ends_at — when the quota resets — which is
+// the earliest ask worth making; zcode-switch maps it to nextAt the same
+// way (claim.rs's claim_error). Asking again before it only spends the
+// account's standing with ZCode's risk control.
+const QUOTA_EXHAUSTED = 1005
 // RATE_LIMITED is Z.ai's "请求过于频繁" body code, its answer (with HTTP
 // 429) to a client that asked too often. #503 (MiniFullC, 11-04) read 180
 // "gift plans to claim: Too Many Requests" over four days at magpie's
@@ -138,7 +153,21 @@ function claimNeedsCaptcha(c) {
   if (typeof k !== "object" || Array.isArray(k)) return null
   return k.enabled !== false
 }
-const CAPTCHA_CLAIM = "claim it in the ZCode app: ZCode asks its security check before a claim, which only the app passes, so the daily check-in leaves it to the app"
+// CAPTCHA_CLAIM is said when ZCode wants its security check but it can't be
+// passed here (no Chromium on the machine, or a config with no scene): the
+// plans are named, and the one right action is the app.
+const CAPTCHA_CLAIM = "claim it in the ZCode app: ZCode asks its security check before a claim, and this machine can't pass it"
+// CAPTCHA_TIMEOUT_MS is the whole solve's cap (browser start, page, the
+// traceless wait). A check-in that hangs past it is a failed one, not a
+// stuck account.
+const CAPTCHA_TIMEOUT_MS = 45_000
+// captchaSolver makes the proof a claim with security on posts; it is
+// src/captcha.mjs's browser run, and setCaptchaSolver swaps it for tests
+// (a real browser is no part of a unit test).
+let captchaSolver = solveCaptchaSerially
+function setCaptchaSolver(fn) {
+  captchaSolver = typeof fn === "function" ? fn : solveCaptchaSerially
+}
 
 // The marketing feed and the claim are gated on the client's version:
 // under an older version's header the feed answers empty (11-03, #678:
@@ -152,12 +181,35 @@ const marketingHeaders = () => ({ "X-ZCode-App-Version": APP_VERSION, "X-Platfor
 // that reads decides: an HTTP error without one, or text that isn't
 // JSON, is failed (unknown), never claimed. Only the code is read (#503
 // has a real code 0 reply, "Plan claimed successfully.").
-async function claimOne(s, planID) {
+//
+// `proof` is the Aliyun captcha parameter (src/captcha.mjs), or null
+// when ZCode's configs say claims go without one: it goes in
+// X-Aliyun-Captcha-Verify-Param, and its region in
+// X-Aliyun-Captcha-Verify-Region, as the ZCode client sends them
+// (zcode-switch's submit_claim).
+// endsAt reads a claim's data.plan.ends_at (seconds) as an ISO time: a
+// 1005's wait ends there, and the card says when the plan's allowance
+// starts and stops (data.plan.starts_at / ends_at).
+const endsAt = (env) => {
+  const s = Number(env?.data?.plan?.ends_at)
+  return Number.isFinite(s) && s > 0 ? new Date(s * 1000).toISOString() : undefined
+}
+async function claimOne(s, planID, proof = null) {
   let res, text
   try {
     res = await fetch(`${ZCODE}/api/v1/zcode-plan/billing/claim`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json", "User-Agent": UA, Authorization: "Bearer " + s.jwt, "X-Device-Mid": s.device || anyDevice, ...marketingHeaders() },
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "User-Agent": UA,
+        Authorization: "Bearer " + s.jwt,
+        "X-Device-Mid": deviceOf(s),
+        ...(proof?.param
+          ? { "X-Aliyun-Captcha-Verify-Param": proof.param, ...(proof.region ? { "X-Aliyun-Captcha-Verify-Region": proof.region } : {}) }
+          : {}),
+        ...marketingHeaders(),
+      },
       body: JSON.stringify({ plan_id: planID }),
     })
     text = await res.text()
@@ -178,6 +230,7 @@ async function claimOne(s, planID) {
   // 1003 之前，与上游 toClaimOutcome 的分支顺序一致。
   if (code === UNUSUAL_ACTIVITY) return { outcome: "failed", why: UNUSUAL_ACTIVITY_CLAIM, blocked: true }
   if (code === CLAIMED_ALREADY) return { outcome: "done" }
+  if (code === QUOTA_EXHAUSTED) return { outcome: "ineligible", why: msg || `code ${code}`, until: endsAt(env) }
   if (code === NOT_ELIGIBLE) return { outcome: "ineligible", why: msg || `code ${code}` }
   if (code === 0 && res.ok) return { outcome: "claimed" }
   if (!Number.isFinite(code)) return { outcome: "failed", why: `HTTP ${res.status}, unreadable reply ${String(text ?? "").trim().slice(0, 120) || "(empty)"}` }
@@ -204,8 +257,10 @@ const TOUCH = "/api/v1/marketing/touch"
 // PREVIEW is ZCode's daily gift plans: GET
 // /api/v1/zcode-plan/billing/preview?app_version=…&platform=…, answered
 // data.plans[].plan_id. It is the main list (a daily gift plan is
-// claimed with no banner); the machine's id is all it needs, no
-// Authorization.
+// claimed with no banner). It is **not** public: without the account's
+// Authorization it answers HTTP 401 (2026-11-13, all five accounts), so
+// it goes with the same billing headers as the claim (zcode-switch's
+// preview_once sends the JWT too).
 const PREVIEW = "/api/v1/zcode-plan/billing/preview"
 // CLAIM_ACTION is the marketing feed's claim button: a delivery's
 // buttons[].action = {"type":"claim_zcode_plan","args":{"plan_id":…}}.
@@ -239,6 +294,33 @@ const clientLanguage = () => {
   } catch {}
   return /^zh\b/i.test(l) ? "zh-CN" : "en-US"
 }
+// deviceOf is the machine id an account's calls carry: the sign-in's saved
+// device, or — a key-only sign-in, which has none — a UUID made from the
+// key, the same one on every start. One account, one id: ZCode's server
+// dedupes by device_mid and date, so accounts sharing a mid claim each
+// other's plans (zcode-switch gives each account its own virtual mid for
+// exactly this reason, store.rs's ensure_virtual_device_mid).
+const deviceOf = (s) => s.device || keyDevice(s.key || s.jwt || "")
+// clientTimezone is the IANA zone ZCode's event report names. It is not
+// read for anything else, and an unknown zone is still a value the report
+// takes, so a broken Intl is no reason to fail the check-in.
+const clientTimezone = () => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+  } catch {
+    return "UTC"
+  }
+}
+// osCategory is ZCode's own name for the OS in its event report:
+// windows / macos / linux, not Node's win32 / darwin / linux.
+const osCategory = () => (process.platform === "win32" ? "windows" : process.platform === "darwin" ? "macos" : "linux")
+const osVersion = () => {
+  try {
+    return os.release()
+  } catch {
+    return ""
+  }
+}
 
 // touchPlans is the plans marketing/touch's deliveries offer to claim:
 // [{plan_id, name, campaign_id?}], [] for a feed with no deliveries,
@@ -270,11 +352,16 @@ function touchPlans(d) {
 }
 
 // previewPlans is the plans billing/preview offers to claim:
-// [{plan_id, name}], [] for a reply naming no plan, null for one that
-// doesn't read. Only plan_id and name are read: the amount the preview
-// also carries is no part of auth.checkin's answer (magpie's window,
-// not this hook, counts allowance), and an unread reply is unknown,
-// never none.
+// [{plan_id, name, priority}], [] for a reply naming no plan, null for one
+// that doesn't read. Only plan_id, name and priority are read: the amount
+// the preview also carries is no part of auth.checkin's answer (magpie's
+// window, not this hook, counts allowance), and an unread reply is
+// unknown, never none.
+//
+// The list keeps ZCode's own priority, highest first: the app shows the
+// plans in that order, and a plan claimed first is the one the day's
+// quota was kept for (zcode-switch sorts by priority the same way,
+// claim.rs's preview_once).
 function previewPlans(d) {
   if (d == null) return []
   if (typeof d !== "object" || Array.isArray(d)) return null
@@ -284,8 +371,12 @@ function previewPlans(d) {
   for (const p of d.plans) {
     if (!p || typeof p !== "object" || Array.isArray(p)) continue
     if (typeof p.plan_id !== "string" || !p.plan_id.trim()) continue
-    out.push({ plan_id: p.plan_id.trim(), name: first(p.name, p.plan_id.trim()) })
+    const priority = Number(p.priority)
+    out.push({ plan_id: p.plan_id.trim(), name: first(p.name, p.plan_id.trim()), priority: Number.isFinite(priority) ? priority : 0 })
   }
+  // highest priority first; same priority keeps ZCode's own list order
+  // (Array.sort is stable), which is the order the app shows them in
+  out.sort((a, b) => b.priority - a.priority)
   return out
 }
 
@@ -338,8 +429,8 @@ async function toClaim(s, { preview: withPreview = true } = {}) {
     }
     got.forEach(add)
   }
-  if (withPreview) await read("the plan list", () => call("GET", `${ZCODE}${PREVIEW}?app_version=${APP_VERSION}&platform=${platform()}`, { device: s.device, headers: marketingHeaders() }).then(previewPlans))
-  await read("the marketing feed", () => call("GET", `${ZCODE}${TOUCH}?seq=${touchSeq++}`, { auth: "Bearer " + s.jwt, device: s.device, headers: marketingHeaders() }).then(touchPlans))
+  if (withPreview) await read("the plan list", () => call("GET", `${ZCODE}${PREVIEW}?app_version=${APP_VERSION}&platform=${platform()}`, { auth: "Bearer " + s.jwt, device: deviceOf(s), headers: marketingHeaders() }).then(previewPlans))
+  await read("the marketing feed", () => call("GET", `${ZCODE}${TOUCH}?seq=${touchSeq++}`, { auth: "Bearer " + s.jwt, device: deviceOf(s), headers: marketingHeaders() }).then(touchPlans))
   return { plans, unread, rate }
 }
 
@@ -355,17 +446,42 @@ async function toClaim(s, { preview: withPreview = true } = {}) {
 // A report that fails is **not** the check-in's failure: it is reported
 // again on the next ask, and a failed report must never turn a claim into
 // a failed one — so each event is its own try, and nothing is said about
-// it. platform is the machine's own name (win32 / darwin / linux; the
-// reference's "win32" is the ZCode desktop's, being the only one that
-// exists there), and the app version is the current client's, as every
-// call here sends it.
+// it.
+//
+// The body is ZCode's own event schema, field for field: the app's
+// reportActivationEvent (zcode-switch's claim.rs activation_event_body).
+// The two fields that decide whether the server counts it are
+// `element_name` (the event's name — a body that sends `event` instead is
+// a body the server ignores, and the day's plans never appear) and
+// `event_id` (a fresh UUID per report; the server dedupes by it and by
+// device_mid + date). `user_id` is the account's own id, `device_mid` its
+// virtual one (deviceOf), and the OS is named the way ZCode names it
+// (windows / macos / linux), not the way Node does.
 async function reportActivation(s) {
+  const device = deviceOf(s)
   for (const event of ACTIVATION_EVENTS) {
     try {
       await call("POST", `${ZCODE}${EVENT_REPORT}`, {
-        device: s.device,
+        device,
         headers: marketingHeaders(),
-        body: { event, device_mid: s.device || anyDevice, platform: process.platform, app_version: APP_VERSION },
+        body: {
+          event_id: uuid(),
+          client_timezone: clientTimezone(),
+          client_language: clientLanguage(),
+          element_name: event,
+          event_region: "app",
+          event_type: "view",
+          event_text: "",
+          event_extra_detail: {},
+          user_id: String(s.uid ?? "").trim(),
+          screen_resolution: "2560x1440",
+          app_version: APP_VERSION,
+          device_os_category: osCategory(),
+          device_os_version: osVersion(),
+          device_mid: device,
+          mac_id: "",
+          marketing_params: "{}",
+        },
       })
     } catch {}
   }
@@ -484,27 +600,47 @@ async function claimDaily(s) {
       ? { outcome: "failed", message: unread.join("; ") }
       : { outcome: "inactive", message: NO_PLAN_TODAY, until: recheck() }
   }
-  // a claim ZCode guards with its security check is not posted: the app
-  // passes it before each claim and sends the proof in a header, which
-  // this plugin can't make, and a claim without it only gets 3007 again
-  // (young02036 on Discord, 11-07: asked every day, never claimed). The
-  // plans are named, to claim in the ZCode app. A config that doesn't
-  // read leaves it unknown: nothing is posted, and it is asked again.
-  let guarded
+  // ZCode's security check for claims, read before any is posted: its
+  // client/configs says whether claims want one (captchaOf). When they do,
+  // the proof is made first — a controlled Chromium runs Aliyun's
+  // traceless verification (src/captcha.mjs), the same way the ZCode
+  // client's hidden WebView does, and the claim goes with
+  // X-Aliyun-Captcha-Verify-Param; a claim without it only answers 3007.
+  // A check that can't be passed (no browser, a person needed, the wait
+  // ran out) is said as `captcha` — magpie's word for "claim it in the
+  // app" — with the plans named: nothing is posted for them, and the
+  // account keeps its sign-in.
+  let captcha
   try {
-    guarded = claimNeedsCaptcha(await clientConfigs())
+    captcha = captchaOf(await clientConfigs())
   } catch (e) {
-    guarded = null
-    unread.push(`ZCode's client config: ${e?.message ?? String(e)}`)
-  }
-  if (guarded !== false) {
     rateWait.delete(holdKey(s))
-    if (guarded === null) return { outcome: "failed", message: [...plans.map((p) => `${p.name}: not claimed, ZCode's security check for claims can't be read`), ...unread].join("; ") }
+    return { outcome: "failed", message: [...plans.map((p) => `${p.name}: not claimed, ZCode's security check for claims can't be read`), `ZCode's client config: ${e?.message ?? String(e)}`, ...unread].join("; ") }
+  }
+  if (captcha === null) {
+    rateWait.delete(holdKey(s))
+    return { outcome: "failed", message: [...plans.map((p) => `${p.name}: not claimed, ZCode's security check for claims can't be read`), ...unread].join("; ") }
+  }
+  if (captcha.enabled && !captcha.sceneId) {
+    rateWait.delete(holdKey(s))
     return { outcome: "captcha", message: plans.map((p) => `${p.name}: ${CAPTCHA_CLAIM}`).join("; ") }
   }
   const got = []
   for (const p of plans) {
-    const one = { name: p.name, ...(await claimOne(s, p.plan_id)) }
+    let proof = null
+    if (captcha.enabled) {
+      try {
+        proof = await captchaSolver({ sceneId: captcha.sceneId, region: captcha.region, prefix: captcha.prefix, timeoutMs: CAPTCHA_TIMEOUT_MS })
+      } catch (e) {
+        // the check wants a person, or this machine can't run it: the
+        // plan stays unclaimed, and the rest are not posted either (a
+        // claim without the proof is a 3007 the account pays for). The
+        // why is the failure alone — `said` adds the one right action.
+        got.push({ name: p.name, outcome: "captcha", why: e?.message ?? String(e) })
+        break
+      }
+    }
+    const one = { name: p.name, ...(await claimOne(s, p.plan_id, proof)) }
     got.push(one)
     // the campaign's receipt, for a plan that was claimed or had been —
     // never for one that failed (confirmPlan)
@@ -540,18 +676,21 @@ async function claimDaily(s) {
   if (claimed.length) return { outcome: "claimed", message: said }
   // a plan not offered now can be offered later in the day (11-04: an
   // account's GLOBAL BUILD banner showed 28 minutes after it signed in),
-  // so an ineligible is read again half an hour out, as an inactive is
-  if (got.some((g) => g.outcome === "ineligible")) return { outcome: "ineligible", message: said, until: recheck() }
+  // so an ineligible is read again half an hour out, as an inactive is —
+  // unless ZCode said when the quota resets (1005's data.plan.ends_at),
+  // which is the earliest ask worth making
+  const ineligible = got.find((g) => g.outcome === "ineligible")
+  if (ineligible) return { outcome: "ineligible", message: said, until: ineligible.until ?? recheck() }
   return { outcome: "done", message: `already claimed: ${named("done").join(", ")}` }
 }
 
 export {
-  CLAIMED_ALREADY, CAPTCHA, NOT_ELIGIBLE, RATE_LIMITED, RATE_LIMIT_MAX_MS,
+  CLAIMED_ALREADY, CAPTCHA, NOT_ELIGIBLE, QUOTA_EXHAUSTED, RATE_LIMITED, RATE_LIMIT_MAX_MS,
   UNUSUAL_ACTIVITY, UNUSUAL_ACTIVITY_CLAIM,
   rateWait, resetRateWait, holdKey, noteRateLimit, CAPTCHA_WORDS, claimNeedsCaptcha,
-  CAPTCHA_CLAIM, marketingHeaders, claimOne, TOUCH, PREVIEW, MARKETING_ACTION,
-  EVENT_REPORT, ACTIVATION_EVENTS, CLAIM_ACTION, touchSeq,
-  clientLanguage, touchPlans, previewPlans, toClaim, reportActivation, confirmPlan,
+  CAPTCHA_CLAIM, CAPTCHA_TIMEOUT_MS, setCaptchaSolver, marketingHeaders, claimOne, TOUCH, PREVIEW, MARKETING_ACTION,
+  EVENT_REPORT, ACTIVATION_EVENTS, CLAIM_ACTION, touchSeq, deviceOf, endsAt,
+  clientLanguage, clientTimezone, osCategory, touchPlans, previewPlans, toClaim, reportActivation, confirmPlan,
   RECHECK_MS, recheck, NO_PLAN_TODAY, claimDaily,
   CLAIM_HINT, claimHint,
 }

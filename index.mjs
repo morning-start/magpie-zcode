@@ -7,7 +7,8 @@
 //  ③ auth.refresh(auth, provider)        续期（ZCode 的 Start Plan token 不能续，只能重登）
 //  ④ auth.loader(getAuth, provider)      请求接管（src/loader.mjs）
 //  ⑤ auth.usage(getAuth, provider)       额度卡片（src/allowance.mjs）
-//  ⑥ auth.checkin(getAuth, provider)     每日领取赠送计划（src/claim.mjs）
+//  ⑥ auth.checkin(getAuth, provider)     每日领取赠送计划（src/claim.mjs；
+//                                        领取前的安全验证见 src/captcha.mjs）
 //  ⑦ provider.models(provider, {auth})   每账号的模型目录（src/catalog.mjs）
 //  ⑧ "chat.headers"(input, output)       每请求加 x-session-id
 //

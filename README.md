@@ -11,7 +11,8 @@
    **Start Plan**（请求按 ZCode 自己的形状整形，否则 zcode.z.ai 回 405）；
 3. **额度卡片** —— Coding Plan 的 5 小时 / 周窗口与套餐、团队席位、Start Plan 的 bucket，
    时间统一转成 ISO，`aside` 窗口只上卡片；
-4. **每日领取** —— ZCode 营销 feed 里投放的赠送计划由插件替用户领。
+4. **每日领取** —— ZCode 的赠送计划由插件替用户领：preview 与营销 feed 合并去重，
+   领取前的阿里云无感验证由受控浏览器自动过（过不去才交给 ZCode App）。
 
 ## 安装
 
@@ -94,13 +95,23 @@ Claude Code 的 `ToolSearch` 会以 `ToolSearchTool` 发出去（否则计划端
 
 ## 每日领取
 
-`auth.checkin` 领 ZCode 营销 feed（`/api/v1/marketing/touch`）里投放的赠送计划：
+`auth.checkin` 领 ZCode 的赠送计划：`billing/preview` 的每日赠送 + 营销 feed
+（`/api/v1/marketing/touch`）里投放的活动，按 plan id 合并去重。
+
+ZCode 的领取被阿里云验证码守着（`client/configs` 的 `data.configs.captcha`）。
+插件照 ZCode 客户端自己的做法过这一关：开一个受控 Chromium（屏幕外的**真窗口**，
+不是 headless——无感验证看指纹），页面载入阿里云官方 SDK 跑**无感验证**，把
+`captchaVerifyParam` 放进 `X-Aliyun-Captcha-Verify-Param` 再领，和 zcode-switch
+1.7.x 的隐藏 Webview 同一条路。解不出（机器上没有 Chromium、无感要人工、45 秒超时）
+才退回 `captcha`，让用户去 ZCode App 手动领。每次领取都带该账号自己的
+`X-Device-Mid`（服务端按 `device_mid` + 日期去重，多号共用一个会被互相顶掉）。
 
 - `claimed` —— 刚领到；
 - `done` —— 今天已经领过（1003）；
 - `inactive` —— 现在没有可领的计划，半小时后再问（计划常在白天才投放）；
-- `captcha` —— ZCode 要 App 的安全验证（3007），只能去 ZCode App 里领；
-- `ineligible` —— 这个计划此刻不对这个账号开放（1004），半小时后再看；
+- `captcha` —— 安全验证过不去（没有可用浏览器 / 要人工验证），去 ZCode App 里领；
+- `ineligible` —— 这个计划此刻不对这个账号开放（1004），或今日名额已用完
+  （1005，按 `data.plan.ends_at` 再问）；
 - `failed` —— 读不到、或限流（3002）：按厂商的 `Retry-After`（没有就从 30 分钟翻倍，
   最多 6 小时）挂起，等待期内不再打上游。
 
@@ -132,6 +143,7 @@ ZCode 的模型表在它自己的 provider 配置里，插件读 revision 更新
 | [`src/gift.mjs`](./src/gift.mjs) | 赠送额度（Start Plan）余额读取与 bucket 归属 |
 | [`src/allowance.mjs`](./src/allowance.mjs) | 额度卡片：Coding 窗口、团队席位、Start Plan、重置次数 |
 | [`src/claim.mjs`](./src/claim.mjs) | 每日领取（`auth.checkin`）、限流挂起 |
+| [`src/captcha.mjs`](./src/captcha.mjs) | 领取的安全验证：受控浏览器跑阿里云无感验证，拿 `captchaVerifyParam` |
 | [`src/catalog.mjs`](./src/catalog.mjs) | ZCode provider 配置 → 模型条目（`provider.models`） |
 | [`src/start.mjs`](./src/start.mjs) | Start Plan 请求整形（头、`dress`、`queryOf`、ToolSearch 改名） |
 | [`src/concurrency.mjs`](./src/concurrency.mjs) | 在飞并发闸、被拒重试、整机防火墙挂起 |

@@ -1,9 +1,9 @@
 import test, { afterEach, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { billKey, isPositiveGrant, reconcileCheckin } from '../src/checkin.mjs'
-import { claimDaily, claimHint, resetRateWait } from '../src/claim.mjs'
+import { claimDaily, claimHint, resetRateWait, setCaptchaSolver } from '../src/claim.mjs'
 import { resetClientConfigs } from '../src/catalog.mjs'
-import { APP_VERSION } from '../src/zcode.mjs'
+import { APP_VERSION, keyDevice } from '../src/zcode.mjs'
 
 const done = { outcome: 'done', credit: 0, message: '今日已签到' }
 
@@ -212,6 +212,8 @@ beforeEach(() => {
   // module-level: one test's must not answer the next one's
   resetRateWait()
   resetClientConfigs()
+  // 验证码解法是浏览器：单测里默认还原成「没有解法」，需要的用例自己注入
+  setCaptchaSolver(null)
 })
 afterEach(() => {
   globalThis.fetch = realFetch
@@ -278,14 +280,21 @@ test('营销回执：1003（已领取）仍要回执 —— 那正是「已处�
 })
 
 test('营销回执：没领到（1005）时绝不发 confirm', async () => {
+  const ends = Math.trunc(Date.now() / 1000) + 3600
   const calls = upstream({
     '/api/v1/marketing/touch': () => ok({ deliveries: [delivery('c-1', 'p1')] }),
-    '/api/v1/zcode-plan/billing/claim': () => refusal(1005, 'exceed quota limit', 400),
+    '/api/v1/zcode-plan/billing/claim': () =>
+      new Response(JSON.stringify({ code: 1005, msg: 'exceed quota limit', data: { plan: { ends_at: ends } } }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }),
   })
 
   const out = await claimDaily(account)
 
-  assert.equal(out.outcome, 'failed')
+  // 1005 = 今日名额已用完：ineligible，且到 data.plan.ends_at 之前不再问
+  assert.equal(out.outcome, 'ineligible')
+  assert.equal(Date.parse(out.until), ends * 1000)
   assert.deepEqual(receipts(calls), [])
 })
 
@@ -307,10 +316,14 @@ test('补活跃上报：列 plan 之前先发 app_launch 与 app_daily_active', 
 
   await claimDaily(account)
 
-  assert.deepEqual(reports(calls).map((c) => c.body.event), ['app_launch', 'app_daily_active'])
+  // 事件名在 element_name 里（ZCode 的事件 schema），不是 event —— 写错服务端不认
+  assert.deepEqual(reports(calls).map((c) => c.body.element_name), ['app_launch', 'app_daily_active'])
   assert.equal(reports(calls)[0].method, 'POST')
   assert.equal(reports(calls)[0].body.device_mid, account.device)
   assert.equal(reports(calls)[0].body.app_version, APP_VERSION)
+  assert.match(reports(calls)[0].body.event_id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+  assert.equal(reports(calls)[0].body.event_region, 'app')
+  assert.equal(reports(calls)[0].body.user_id, '')
   // 先上报、后列 plan
   const firstReport = calls.findIndex((c) => c.url.pathname === '/api/v1/event/report')
   const firstList = calls.findIndex((c) => c.url.pathname === '/api/v1/zcode-plan/billing/preview')
@@ -406,4 +419,110 @@ test('卡片那行只读营销 feed，不请求 preview', async () => {
 
   assert.deepEqual(calls.map((c) => c.url.pathname), ['/api/v1/marketing/touch'])
   assert.equal(line.display, '1 · p1')
+})
+
+// ⑦ 每账号一个 device_mid：服务端按 device_mid + 日期 去重，共用 mid 的账号会互相顶掉
+test('每账号一个 device_mid：只有 key 的账号用 key 派生稳定 id', async () => {
+  const calls = upstream({ '/api/v1/zcode-plan/billing/preview': () => ok({ plans: [] }) })
+
+  await claimDaily({ jwt: token, key: 'sk-account-key' })
+
+  const mid = reports(calls)[0].body.device_mid
+  assert.match(mid, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+  assert.equal(mid, keyDevice('sk-account-key'))
+})
+
+// 活跃上报的 user_id 是账号自己的 id（stateOf 从 magpie 的 auth 带出来）——
+// 空串是服务端可能不计数的上报，preview 因此可能一直回空 plans
+test('活跃上报带账号自己的 user_id', async () => {
+  const calls = upstream({ '/api/v1/zcode-plan/billing/preview': () => ok({ plans: [] }) })
+
+  await claimDaily({ ...account, uid: 'u-42' })
+
+  assert.equal(reports(calls)[0].body.user_id, 'u-42')
+})
+
+// preview 不是公开接口：2026-11-13 五个账号全挂在「the plan list: Unauthorized」上，
+// 因为不带 Authorization 就是 HTTP 401（zcode-switch 的 preview_once 也带 JWT）
+test('preview 带账号的 Authorization', async () => {
+  const calls = upstream({ '/api/v1/zcode-plan/billing/preview': () => ok({ plans: [] }) })
+
+  await claimDaily(account)
+
+  const preview = calls.find((c) => c.url.pathname === '/api/v1/zcode-plan/billing/preview')
+  assert.equal(preview.headers.get('authorization'), 'Bearer ' + token)
+})
+
+// ⑧ 安全验证：解得出就带着参数领，解不出退回 captcha（绝不 post 一发没有参数的 claim）
+const captchaConfig = { enabled: true, region: 'cn', prefix: 'prefix', sceneId: 'scene' }
+const configsWith = (captcha) => ok({ configs: { captcha } })
+
+test('安全验证开启：先解无感验证，claim 带阿里云参数', async () => {
+  const calls = upstream({
+    '/api/v1/client/configs': () => configsWith(captchaConfig),
+    '/api/v1/zcode-plan/billing/preview': () => ok({ plans: [plan('p1')] }),
+  })
+  let asked = null
+  setCaptchaSolver(async (o) => {
+    asked = o
+    return { param: 'P-123', region: 'cn' }
+  })
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'claimed')
+  assert.equal(asked.sceneId, 'scene')
+  assert.equal(asked.region, 'cn')
+  assert.equal(asked.prefix, 'prefix')
+  const claim = calls.find((c) => c.url.pathname === '/api/v1/zcode-plan/billing/claim')
+  assert.equal(claim.headers.get('x-aliyun-captcha-verify-param'), 'P-123')
+  assert.equal(claim.headers.get('x-aliyun-captcha-verify-region'), 'cn')
+})
+
+test('解不出验证码：退回 captcha 结果，且不 post claim', async () => {
+  const calls = upstream({
+    '/api/v1/client/configs': () => configsWith(captchaConfig),
+    '/api/v1/zcode-plan/billing/preview': () => ok({ plans: [plan('p1')] }),
+  })
+  setCaptchaSolver(async () => {
+    throw new Error('no browser')
+  })
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'captcha')
+  assert.match(out.message, /no browser/)
+  assert.deepEqual(claims(calls), [])
+  assert.deepEqual(receipts(calls), [])
+})
+
+test('验证码配置关着：不跑浏览器，claim 不带阿里云头', async () => {
+  const calls = upstream({
+    '/api/v1/client/configs': () => configsWith({ enabled: false, sceneId: 'scene' }),
+    '/api/v1/zcode-plan/billing/preview': () => ok({ plans: [plan('p1')] }),
+  })
+  let solved = 0
+  setCaptchaSolver(async () => {
+    solved++
+    return { param: 'x', region: '' }
+  })
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'claimed')
+  assert.equal(solved, 0)
+  const claim = calls.find((c) => c.url.pathname === '/api/v1/zcode-plan/billing/claim')
+  assert.equal(claim.headers.get('x-aliyun-captcha-verify-param'), null)
+})
+
+test('验证码配置读不懂：failed，不 post claim', async () => {
+  const calls = upstream({
+    '/api/v1/client/configs': () => configsWith('on'),
+    '/api/v1/zcode-plan/billing/preview': () => ok({ plans: [plan('p1')] }),
+  })
+
+  const out = await claimDaily(account)
+
+  assert.equal(out.outcome, 'failed')
+  assert.deepEqual(claims(calls), [])
 })

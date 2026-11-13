@@ -48,7 +48,9 @@ export function registryAppPath(exe) {
       `SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${exe}`,
     ]) {
       try {
-        const out = execFileSync("reg", ["query", `${root}\\${tail}`, "/ve"], { encoding: "utf8", timeout: 5000 })
+        // stderr 必须吞掉：没装的浏览器 reg 会往 stderr 打「找不到指定的注册表项」，
+        // 一个候选一次，六十来行噪声会盖住真正的错误（magpie 的日志里也在）
+        const out = execFileSync("reg", ["query", `${root}\\${tail}`, "/ve"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })
         const line = out.split("\n").find((l) => /REG_SZ/i.test(l))
         const path = line?.split("REG_SZ")[1]?.trim()
         if (path && existsSync(path)) return path

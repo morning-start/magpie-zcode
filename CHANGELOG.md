@@ -6,6 +6,30 @@
 > 本仓库派生自 [magpie 插件脚手架](https://github.com/MYCF711/magpie-plugin-scaffold)（模板历史停在 0.3.12），
 > 插件自己的版本从 0.1.0 起算。
 
+## 0.1.2 — 2026-11-13
+
+**每日领取：照 ZCode 客户端（zcode-switch 1.7.x）的做法自己过安全验证**
+
+- **preview 补上 `Authorization`**：`/billing/preview` 不是公开接口，不带账号 JWT 就是
+  HTTP 401（2026-11-13 五个账号全挂在「the plan list: Unauthorized」），这是签到失败的根因
+- **阿里云无感验证自动过**：`claim` 被验证码守着（没 `X-Aliyun-Captcha-Verify-Param` 就
+  3007）。插件开一个屏幕外的受控 Chromium，页面载入阿里云官方 SDK 跑
+  `startTracelessVerification()`，拿到 `captchaVerifyParam` 再领；解不出（没有浏览器 /
+  要人工 / 45 秒超时）才退回 `captcha` 让用户去 App 领。全局串行，多账号不会同时开浏览器
+- **每账号一个 `X-Device-Mid`**：没有保存 device 的账号用 key 派生稳定 UUID —— 服务端按
+  `device_mid` + 日期去重，多号共用一个会互相顶掉
+- **活跃上报改成 ZCode 自己的事件 schema**：`element_name` / `event_id` / `user_id` /
+  `screen_resolution` / `device_os_*` / `marketing_params`。原来发的是 `event` +
+  `platform`，服务端不认，preview 因此可能一直回空 plans；`user_id` 取账号自己的 uid
+  （`stateOf` 以前根本没带出来，一直是空串）
+- **1005（今日名额已用完）**：`ineligible` + 按 `data.plan.ends_at` 再问，不再当 failed
+  半小时后重撞
+- **preview 按 `priority` 降序领**（同优先级保持服务端顺序），和 ZCode App 显示的顺序一致
+- **验证码浏览器清理**：Chrome 启动器会 re-exec，只按 pid 杀会漏（实测 5 个临时
+  profile 残留、Chrome 还挂着）；改成按 pid + 命令行里的 profile 路径双杀，`rmSync` 带
+  重试，并在下次解法开始前扫掉两小时前的残留
+- 顺手：`reg query` 的 stderr 噪声（每个没装的浏览器一次）不再打到日志里
+
 ## 0.1.1 — 2026-11-08
 
 **签到对齐 deepseek-harness-codearts 的 zcode 领取语义（只对齐语义，不产 captcha）**

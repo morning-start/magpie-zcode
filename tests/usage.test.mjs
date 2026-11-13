@@ -318,7 +318,7 @@ test("a team seat: the team plan's windows, name, end and resets, its key found 
   expect(sets.length).toBe(1)
   expect(sets[0].path).toEqual({ id: "zcode" })
   expect(sets[0].body.access).toBe("tk.ts")
-  expect(JSON.parse(sets[0].body.refresh)).toEqual({ ...state, key: "tk.ts", device: expect.any(String) })
+  expect(JSON.parse(sets[0].body.refresh)).toEqual({ ...state, key: "tk.ts", uid: "", device: expect.any(String) })
 })
 
 test("Z.ai's refusals are the card's error", async () => {

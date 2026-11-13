@@ -1,6 +1,6 @@
 {
   "name": "magpie-zcode",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "magpie provider plugin: signs in to ZCode's GLM Coding Plan (Z.ai or BigModel / 智谱) the way ZCode does, including team seats and ZCode's free Start Plan, and claims its gift plans daily",
   "type": "module",
   "main": "./index.mjs",

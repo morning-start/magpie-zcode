@@ -190,7 +190,9 @@ test("the app's sign-in keeps the user id, and follows ZCode by it", async () =>
 
   zcodeHas({ [KEY]: "id2.secret2", zcodejwttoken: "j2", "oauth:zai:user_info": as("u1") })
   expect(_internal.stateOf(auth)).toMatchObject({ key: "id2.secret2", jwt: "j2" })
-  expect(_internal.stateOf(auth).uid).toBeUndefined()
+  // uid 是账号自己的 id，从 magpie 的 auth 来（不是 refresh 里那份）：
+  // 激活上报（src/claim.mjs 的 reportActivation）要用它当 user_id
+  expect(_internal.stateOf(auth).uid).toBe("u1")
 
   // another account named Ada: A's entry keeps what it saved
   zcodeHas({ [KEY]: "id3.secret3", zcodejwttoken: "j3", "oauth:zai:user_info": as("u2") })
